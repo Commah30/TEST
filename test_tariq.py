@@ -49,7 +49,13 @@ def test_stuck_active_reading_does_not_rearm_after_consumption():
     tariq_pre_tick(state)
     assert state.flags["hammer_storm_proc_ready"] is True
     tariq_post_tick(state, "hammer_storm_proc")
+    # Confirmation : une vraie canalisation démarre (cf.
+    # HAMMER_STORM_PROC_CONFIRM_WINDOW_S) -- SEULE cette confirmation efface
+    # ready désormais, pas la simple presse.
+    state.flags["hammer_storm_casting"] = True
+    tariq_pre_tick(state)
     assert state.flags["hammer_storm_proc_ready"] is False
+    state.flags["hammer_storm_casting"] = False
 
     # Le buff reste lu "actif" en continu sur ~90 ticks (cf. log du rapport),
     # avec d'autres abilities castées entre-temps (face_breaker, culling_strike
@@ -83,7 +89,10 @@ def test_legitimate_rapid_reproc_still_fires():
     tariq_pre_tick(state)
     assert state.flags["hammer_storm_proc_ready"] is True
     tariq_post_tick(state, "hammer_storm_proc")
+    state.flags["hammer_storm_casting"] = True   # confirme le 1er cast (cf. test précédent)
+    tariq_pre_tick(state)
     assert state.flags["hammer_storm_proc_ready"] is False
+    state.flags["hammer_storm_casting"] = False
 
     # Vraie retombée du buff (détectée "not found"), confirmée sur plusieurs
     # ticks consécutifs -- pas un blip d'1 frame.
@@ -113,7 +122,10 @@ def test_single_frame_noise_does_not_rearm_ready_flag():
     tariq_pre_tick(state)
     assert state.flags["hammer_storm_proc_ready"] is True
     tariq_post_tick(state, "hammer_storm_proc")
+    state.flags["hammer_storm_casting"] = True
+    tariq_pre_tick(state)
     assert state.flags["hammer_storm_proc_ready"] is False
+    state.flags["hammer_storm_casting"] = False
 
     # Un SEUL tick de bruit "absent" (pas confirmé) puis "présent" à nouveau.
     state.buffs["hammer_storm_empowered"] = False
@@ -403,6 +415,62 @@ def test_hammer_storm_casting_flag_refreshes_hard_lock():
     print("hard_lock_until suit bien state.flags['hammer_storm_casting'] tick par tick.")
 
 
+def test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry():
+    """BUG TROUVÉ EN JEU (2026-07-13, rapporté par l'utilisateur depuis l'observation
+    directe en jeu) : le bot presse hammer_storm_proc alors que la Fury
+    RÉELLE en jeu est insuffisante (lecture périmée pendant un des épisodes
+    de gel du thread de détection, cf. debug.log 2026-07-12) -- le jeu
+    refuse silencieusement le cast, mais tariq_post_tick marquait quand même
+    le proc "consommé" (ready -> False) sur la seule foi d'avoir pressé la
+    touche. Résultat : plus aucun nouveau front montant ne pouvait s'armer
+    tant que le buff (resté actif en jeu, jamais réellement consommé) ne
+    retombe pas -- Hammer Storm restait bloqué indéfiniment.
+
+    Fix : ready ne doit RESTER effacé que si hammer_storm_casting (cast bar,
+    vérité terrain) confirme une vraie canalisation dans la fenêtre qui suit
+    la presse. Sans confirmation, ready doit rester tel quel (True) pour que
+    le prochain tick retente naturellement."""
+    from wardenbot.hooks import HAMMER_STORM_PROC_CONFIRM_WINDOW_S
+
+    state = State()
+    state.buffs["hammer_storm_empowered"] = True
+    tariq_pre_tick(state)
+    assert state.flags["hammer_storm_proc_ready"] is True
+
+    tariq_post_tick(state, "hammer_storm_proc")
+    # Toujours "en attente" juste après la presse -- ready pas encore jugé.
+    assert state.flags["_hammer_storm_proc_pending"] is True
+
+    # Le jeu ne démarre JAMAIS de canalisation (Fury réelle insuffisante) --
+    # hammer_storm_casting reste False tout du long. On avance le temps
+    # au-delà de la fenêtre de confirmation sans jamais poser casting=True.
+    state.flags["_hammer_storm_proc_pending_since"] -= (HAMMER_STORM_PROC_CONFIRM_WINDOW_S + 0.1)
+    tariq_pre_tick(state)
+
+    assert state.flags["hammer_storm_proc_ready"] is True, (
+        "un press qui n'a mené à AUCUNE canalisation réelle ne doit pas "
+        "consommer le proc -- sinon le bot croit à tort l'avoir utilisé"
+    )
+    assert state.flags["_hammer_storm_proc_pending"] is False, "le marqueur d'attente doit être levé une fois la fenêtre expirée"
+    print("Press sans canalisation réelle confirmée -> ready reste True, retente possible au tick suivant.")
+
+
+def test_hammer_storm_proc_press_with_real_cast_confirms_consumption():
+    """Contre-exemple du test précédent : quand le jeu démarre réellement la
+    canalisation (Fury suffisante, cast accepté), ready doit bien finir par
+    passer à False -- la confirmation fonctionne, pas seulement le rejet."""
+    state = State()
+    state.buffs["hammer_storm_empowered"] = True
+    tariq_pre_tick(state)
+    tariq_post_tick(state, "hammer_storm_proc")
+    assert state.flags["hammer_storm_proc_ready"] is True, "pas encore consommé avant confirmation"
+
+    state.flags["hammer_storm_casting"] = True
+    tariq_pre_tick(state)
+    assert state.flags["hammer_storm_proc_ready"] is False, "la canalisation confirmée doit consommer le proc"
+    print("Press suivi d'une vraie canalisation détectée -> ready passe bien à False.")
+
+
 def test_heavy_strike_outranks_skull_crusher_proc_in_priority():
     """BUG TROUVÉ EN JEU (2026-07-12, debug.log) : heavy_strike et
     skull_crusher_proc étaient à égalité de priority_st (3) -- au tie-break
@@ -437,5 +505,7 @@ if __name__ == "__main__":
     test_focused_wrath_discount_fires_skull_crusher_below_normal_threshold()
     test_no_discount_without_focused_wrath_active()
     test_hammer_storm_casting_flag_refreshes_hard_lock()
+    test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry()
+    test_hammer_storm_proc_press_with_real_cast_confirms_consumption()
     test_heavy_strike_outranks_skull_crusher_proc_in_priority()
     print("\nTous les tests passent.")

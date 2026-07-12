@@ -289,11 +289,63 @@ HAMMER_STORM_LOCK_REFRESH_S = 0.2   # marge au-delà du tick courant -- absorbe 
 HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED = 25.0
 SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED = 12.0   # config/tariq.yaml : fury_above:23 (coût plein) / 2
 
+# BUG TROUVÉ EN JEU (2026-07-13, rapporté par l'utilisateur) : hammer_storm_proc
+# consommé (ready -> False dans tariq_post_tick) sur la seule foi d'avoir
+# PRESSÉ la touche -- sans jamais vérifier que le jeu a réellement lancé le
+# sort. Scénario observé : le thread de détection lit une Fury périmée
+# (cf. les épisodes de gel de plusieurs secondes trouvés dans debug.log,
+# 2026-07-12 -- tout le snapshot reste figé, fury y compris) au-dessus du
+# seuil au moment où la condition YAML est évaluée, mais la VRAIE Fury en
+# jeu est en réalité insuffisante entre-temps -- le jeu refuse silencieusement
+# le cast (pas de canalisation, pas de dépense de Fury), alors que le bot,
+# lui, a déjà marqué le proc comme consommé. Résultat : le buff
+# hammer_storm_empowered reste actif en jeu (jamais réellement consommé),
+# mais plus aucun nouveau front montant ne peut s'armer tant qu'il ne
+# redescend pas (cf. TARIQ_PROC_BUFFS plus haut) -- le proc reste bloqué
+# indéfiniment, Hammer Storm ne repart plus.
+#
+# Fix : même principe que le reste du projet (détecter l'état réel, jamais
+# l'estimer). On a DÉJÀ un signal de vérité terrain pour "Hammer Storm a
+# réellement commencé à canaliser" -- state.flags["hammer_storm_casting"]
+# (cast bar, cf. HAMMER_STORM_LOCK_REFRESH_S ci-dessus). tariq_post_tick ne
+# marque donc plus le proc "consommé" au moment de la presse -- il pose
+# juste un marqueur "en attente de confirmation". tariq_pre_tick confirme
+# (efface vraiment ready) SEULEMENT si hammer_storm_casting devient vrai
+# dans la fenêtre qui suit ; sinon (le press n'a mené à aucun cast réel),
+# ready reste tel quel (déjà True) -- le prochain tick retente naturellement
+# dès que les conditions (fury réelle, GCD) sont de nouveau réunies, au lieu
+# de rester bloqué en silence.
+#
+# skull_crusher_proc n'a PAS ce filet : aucun signal de détection dédié
+# ("est-ce que Skull Crusher a réellement fait des dégâts/proc ?") n'existe
+# actuellement pour lui (contrairement à Hammer Storm, il n'a pas de cast
+# bar propre suivie) -- même vulnérabilité en théorie, non corrigée faute de
+# vérité terrain disponible. Ne pas faire semblant de la corriger avec une
+# heuristique bruitée (ex: delta de Fury) tant qu'aucune vraie détection
+# n'existe -- cf. principe du projet, jamais d'estimation à la place d'une
+# détection.
+HAMMER_STORM_PROC_CONFIRM_WINDOW_S = 0.5   # marge après la presse pour laisser le jeu démarrer la canalisation avant de considérer que le press a échoué
+
 
 def tariq_pre_tick(state: State) -> Optional[str]:
     now = time.monotonic()
     if state.flags.get("hammer_storm_casting", False):
         state.hard_lock_until = max(state.hard_lock_until, now + HAMMER_STORM_LOCK_REFRESH_S)
+        if state.flags.get("_hammer_storm_proc_pending", False):
+            # Canalisation confirmée pendant la fenêtre d'attente -> le press
+            # a réellement abouti, le proc est VRAIMENT consommé maintenant.
+            state.flags["hammer_storm_proc_ready"] = False
+            state.flags["_hammer_storm_proc_pending"] = False
+
+    pending_since = state.flags.get("_hammer_storm_proc_pending_since")
+    if pending_since is not None and now - pending_since > HAMMER_STORM_PROC_CONFIRM_WINDOW_S:
+        # Fenêtre expirée sans canalisation détectée -> le jeu a refusé le
+        # cast (Fury réelle insuffisante, très probablement). ready n'a
+        # JAMAIS été effacé (cf. tariq_post_tick) -- rien à restaurer, on
+        # lève juste le marqueur d'attente pour permettre une nouvelle
+        # tentative dès que les conditions sont réunies.
+        state.flags["_hammer_storm_proc_pending"] = False
+        state.flags.pop("_hammer_storm_proc_pending_since", None)
 
     for proc_name, buff_name in TARIQ_PROC_BUFFS.items():
         prev_key = f"_{buff_name}_prev"
@@ -341,5 +393,12 @@ def tariq_pre_tick(state: State) -> Optional[str]:
 
 
 def tariq_post_tick(state: State, pressed: str) -> None:
-    if pressed in TARIQ_PROC_BUFFS:
+    if pressed == "hammer_storm_proc":
+        # Ne PAS effacer ready ici -- cf. HAMMER_STORM_PROC_CONFIRM_WINDOW_S :
+        # seule une canalisation réellement détectée (tariq_pre_tick) confirme
+        # la consommation. On pose juste le marqueur d'attente avec l'horodatage
+        # de CETTE presse.
+        state.flags["_hammer_storm_proc_pending"] = True
+        state.flags["_hammer_storm_proc_pending_since"] = time.monotonic()
+    elif pressed in TARIQ_PROC_BUFFS:
         state.flags[f"{pressed}_ready"] = False
