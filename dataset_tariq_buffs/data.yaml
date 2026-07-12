@@ -1,0 +1,7 @@
+path: C:/wardenbot/dataset_tariq_buffs
+train: images/train
+val: images/val
+names:
+  0: hammer_storm_buff
+  1: skull_crusher_buff
+  2: focused_wrath_buff

@@ -1,0 +1,33 @@
+# Logs et artefacts d'exécution -- écrasés/régénérés à chaque lancement du bot,
+# aucune valeur en historique (pure diff-noise).
+debug.log
+capture_watchdog.log
+
+# Python
+__pycache__/
+*.pyc
+
+# PyInstaller
+build/
+dist/
+
+# Captures de calibration temporaires (burst_capture.py)
+burst/
+
+# Config locale de l'outil Claude Code (pas du code projet)
+.claude/
+
+# Build PyInstaller (71 Mo, redondant avec les sources -- se rebuild avec
+# `python -m PyInstaller wardenbot.spec`)
+/wardenbot.exe
+
+# Poids YOLO pré-entraînés de base (téléchargés automatiquement par
+# ultralytics au premier entraînement, pas spécifiques au projet -- NE PAS
+# confondre avec runs/detect/*/weights/best.pt, notre modèle entraîné, qui
+# reste versionné)
+/yolo26n.pt
+/yolov8n.pt
+
+# Captures de calibration ponctuelles/debug, écrasées à chaque usage
+scratch_ragebar_001.png
+yolo_check_debug.png

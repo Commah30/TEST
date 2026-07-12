@@ -1,0 +1,222 @@
+# =============================================================================
+# tariq.yaml — rotation Tariq "Spam V2" (importée depuis Schism V2.yaml,
+# fournie par l'utilisateur). Copie DANS le projet pour que l'exe puisse l'embarquer
+# à côté de config/warden.yaml -- l'original externe n'a pas été touché.
+#
+# `post_tick_hook: tariq_post_tick` ci-dessous est un champ hérité du YAML
+# d'origine -- il n'est PAS lu automatiquement par engine.py. Le câblage réel
+# de tariq_pre_tick/tariq_post_tick se fait explicitement dans main.py
+# (dict CHARACTERS), exactement comme pour meiko_pre_tick/meiko_post_tick.
+#
+# DEUX CONDITIONS MODIFIÉES PAR RAPPORT À L'ORIGINAL (fix du bug de
+# double-cast documenté dans message.txt -- cf. wardenbot/hooks.py) :
+#   - hammer_storm_proc : buff:hammer_storm_empowered -> flag:hammer_storm_proc_ready
+#     (+ "not last:hammer_storm_proc" retiré, devenu inutile : le flag est
+#     déjà un front montant à usage unique, cf. tariq_pre_tick/post_tick)
+#   - skull_crusher_proc : buff:skull_crusher_empowered -> flag:skull_crusher_proc_ready
+#     (même forme que hammer_storm_proc, fix appliqué par analogie -- PAS
+#     encore confirmé par des logs en jeu comme hammer_storm_proc, à
+#     surveiller)
+#
+# Le champ `gcd_ms` par-ability de l'original (culling_strike, thunder_call,
+# focused_wrath, etc.) est conservé tel quel -- accepté par Ability
+# (wardenbot/engine.py) mais PAS ENCORE câblé dans le moteur, sémantique à
+# clarifier avant d'y toucher (cf. discussion sur le bug historique "spam
+# Wind Kick" côté Meiko, CLAUDE.md bug #1).
+# state.buffs["hammer_storm_empowered"] / ["skull_crusher_empowered"] sont
+# désormais alimentés par make_tariq_state_update_fn (main.py), via les
+# templates templates/tariq/hammer_storm_buff.png / skull_crusher_buff.png
+# sur REGIONS["tariq"]["tariq_buff_bar"] -- calibrés et validés sur un vrai
+# clip Game Bar (marge de confiance large des deux côtés, cf. main.py).
+# Pas encore reconfirmé EN JEU RÉEL (calibré depuis une vidéo) -- à valider
+# avec detect_check.py une fois en jeu avant de faire confiance à 100%.
+# =============================================================================
+
+class_name: tariq
+build_name: Spam
+display_name: "Spam V2"
+post_tick_hook: tariq_post_tick
+
+gcd_ms: 1000
+
+abilities:
+  # BUG TROUVÉ EN JEU (2026-07-12), corrigé : cooldown_ms:500 était inventé.
+  # Vraie mécanique confirmée par l'utilisateur : cooldown réel de 4.44s ET
+  # disponible seulement quand la cible passe sous 35% PV (icône grisée
+  # au-dessus, allumée en dessous). Template culling_strike.png capturé sur
+  # l'état GRISÉ (indisponible) -- même schéma que chain_lightning plus bas :
+  # skip_detection:true bypass le check normal, et on caste sur L'ABSENCE du
+  # grisé (not debuff:culling_strike_dim) plutôt que la présence d'un
+  # template allumé qu'on n'a pas. cf. make_tariq_state_update_fn (main.py).
+  - name: culling_strike
+    priority_st: 0
+    priority_cleave: 0
+    priority_aoe: 0
+    off_gcd: true
+    skip_detection: true
+    cooldown_ms: 4440
+    gcd_ms: 1
+    condition: not buff:hammer_storm_empowered, not debuff:culling_strike_dim
+
+  # SIMPLIFIÉ (2026-07-12), À LA DEMANDE DE L'UTILISATEUR : plus de déclenchement lié
+  # aux stacks Hammer Storm (le jeu n'affiche jamais "2" sur ce badge, cf.
+  # wardenbot/hooks.py -- toute la logique de combo/comptage était vouée à
+  # l'échec). Focused Wrath part maintenant dès que son cooldown (86s) est
+  # terminé, comme thunder_call -- "not buff:focused_wrath_empowered" évite
+  # juste de recaster tant que le buff précédent est encore actif. Toujours
+  # utile même sans combo particulier : off_gcd, aucun coût, et le rabais de
+  # Fury qu'elle offre (cf. hooks.py, HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED)
+  # profite à Hammer Storm/Skull Crusher dès qu'elle est up.
+  - name: focused_wrath
+    priority_st: 0
+    priority_cleave: 0
+    priority_aoe: 0
+    off_gcd: true
+    cooldown_ms: 86000
+    gcd_ms: 1
+    condition: not buff:focused_wrath_empowered
+
+  # BUG TROUVÉ EN JEU (2026-07-12) : cooldown_ms:1 était inventé -- vrai
+  # cooldown confirmé par l'utilisateur = 43s. En jeu réel avec l'ancienne valeur :
+  # 707 presses en ~2 minutes (off_gcd + quasiment aucun frein = spam
+  # continu à ~30Hz). Root cause identique à culling_strike ci-dessus :
+  # off_gcd bypasse le GCD, donc SEUL cooldown_ms protège contre le spam.
+  - name: thunder_call
+    priority_st: 0
+    priority_cleave: 0
+    priority_aoe: 0
+    off_gcd: true
+    cooldown_ms: 43000
+    gcd_ms: 1
+
+  # BUG TROUVÉ EN JEU (2026-07-12), corrigé : "buff:focused_wrath_empowered"
+  # rendait Hammer Storm OBLIGATOIREMENT dépendante de la fenêtre Focused
+  # Wrath -- or cette fenêtre n'existe que pendant le combo à 2 stacks (cf.
+  # tariq_pre_tick, hooks.py), pas en permanence. Résultat en jeu réel :
+  # focused_wrath castée 67 fois contre seulement 7 hammer_storm_proc --
+  # le proc s'armait bien plus souvent qu'il n'était consommé, gâchant des
+  # procs de la source de dégâts principale (règle "aucun proc ne doit
+  # rater" établie plus tôt). Condition retirée : Hammer Storm part dès que
+  # prête + fury suffisante, QUE Focused Wrath soit up ou non. Le combo à 2
+  # stacks (via tariq_pre_tick) profite quand même du bonus quand la
+  # fenêtre s'aligne -- mais ne bloque plus les cas normaux à 1 stack.
+  # skip_detection ajouté (2026-07-12) : elle dépendait EN PLUS d'un match
+  # de template sur l'icône de la barre d'abilities -- redondant et risqué
+  # vu qu'on a déjà une détection fiable et dédiée du proc via le buff
+  # (front montant sur hammer_storm_empowered, cf. tariq_pre_tick) : seulement
+  # 14 hammer_storm_proc en jeu réel pour la source de dégâts principale,
+  # cohérent avec des procs valides ratés par un 2e check redondant. La
+  # condition (flag:hammer_storm_proc_ready + fury_above:50) est le vrai
+  # garde-fou désormais, pas l'icône.
+  - name: hammer_storm_proc
+    priority_st: 2
+    priority_cleave: 2
+    priority_aoe: 2
+    cooldown_ms: 1   # demandé par l'utilisateur (2026-07-12) -- le vrai garde-fou anti-double-cast est le front montant + réarmement sur augmentation de stacks (hooks.py), pas ce cooldown ; un cooldown_ms plus élevé ne fait que retarder un proc légitime déjà validé (cf. 14:16:38/14:16:40 dans debug.log, 2 procs réels à 2s d'écart)
+    is_proc: true
+    skip_detection: true
+    template: hammer_storm   # gardé pour référence -- plus utilisé pour la détection (skip_detection:true), seulement par REGIONS["tariq"]["hammer_storm_stack_badge"]/état-update
+    condition: fury_above:50, flag:hammer_storm_proc_ready
+
+  # BUG TROUVÉ EN JEU (2026-07-12) : priority_st était à égalité avec
+  # heavy_strike (3 partout) -- au tie-break par ordre de déclaration
+  # (engine.py), skull_crusher_proc étant déclarée AVANT heavy_strike dans
+  # ce fichier, elle gagnait systématiquement le créneau de scan dès que les
+  # deux étaient prêtes en même temps, retardant heavy_strike bien au-delà
+  # de la fin de son propre cooldown -- alors que l'utilisateur a explicitement dit
+  # que heavy_strike doit partir à CHAQUE fin de cooldown, point clé de la
+  # rotation. priority_st descendue à 4 (skull_crusher/face_breaker/
+  # chain_lightning/wild_swing décalées d'un cran en conséquence) pour que
+  # heavy_strike gagne sans ambiguïté.
+  # cooldown_ms remis à 1 par l'utilisateur (2026-07-12) -- le vrai garde-fou
+  # anti-double-cast est le front montant (MIN_ABSENT_TICKS, hooks.py), pas
+  # ce cooldown ; le fix de priority_st ci-dessus (elle ne vole plus le
+  # créneau de scan de heavy_strike) a déjà réglé le symptôme observé
+  # (double presse à 1s d'intervalle, 14:04:08/14:04:09).
+  - name: skull_crusher_proc
+    priority_st: 4
+    priority_cleave: 3
+    priority_aoe: 3
+    skip_detection: true
+    cooldown_ms: 1
+    condition: flag:skull_crusher_proc_ready, fury_above:23
+
+  # cooldown_ms:1 était un placeholder -- vrai cooldown confirmé par l'utilisateur :
+  # 5.92s. Condition "not fury_above:76" retirée (2026-07-12) : l'utilisateur a
+  # confirmé que c'est un point clé de la rotation qui doit partir à CHAQUE
+  # fois que son cooldown se termine, sans condition de fury -- l'ancienne
+  # condition la bloquait au-dessus de 76% fury, contrairement à la vraie
+  # mécanique.
+  # BUG TROUVÉ EN JEU (2026-07-12) : sans skip_detection, elle dépendait
+  # d'un vrai match de template (confidence_threshold:0.61) pour partir --
+  # en jeu réel, elle ratait ce check assez souvent pour que le scan tombe
+  # sur face_breaker/wild_swing à la place, alors qu'elle était réellement
+  # disponible (hors cooldown). skip_detection:true : le vrai cooldown
+  # (5.92s) suffit comme garde-fou, plus de dépendance à la fiabilité de la
+  # détection visuelle pour une ability qui DOIT toujours partir.
+  - name: heavy_strike
+    priority_st: 3
+    priority_cleave: 3
+    priority_aoe: 3
+    cooldown_ms: 5920
+    skip_detection: true
+
+  - name: skull_crusher
+    priority_st: 5
+    priority_cleave: 4
+    priority_aoe: 4
+    skip_detection: true
+    cooldown_ms: 1
+    gcd_ms: 650
+    condition: fury_above:50, not buff:hammer_storm_empowered
+
+  # cooldown_ms:1 était un placeholder -- vrai cooldown confirmé par l'utilisateur :
+  # 4.44s (même valeur que Culling Strike). Contrairement à culling_strike/
+  # thunder_call, face_breaker n'est PAS off_gcd, donc le GCD normal (1s)
+  # limitait déjà le spam en pratique -- mais 1ms restait faux et aurait pu
+  # la faire spammer dès qu'un autre off_gcd libère un tick.
+  - name: face_breaker
+    priority_st: 6
+    priority_cleave: 5
+    priority_aoe: 5
+    cooldown_ms: 4440
+    confidence_threshold: 0.65
+
+  # Détection INVERSÉE : le template "chain_lightning" capturé est l'icône
+  # GRISÉE (indisponible), pas l'icône allumée (bleu clair, activée par
+  # thunder_call -- aucune condition buff/flag ne modélise cette relation
+  # dans le YAML d'origine). skip_detection:true bypass donc le check normal
+  # "mon propre template doit matcher pour presser", et on caste sur
+  # L'ABSENCE du grisé (not debuff:chain_lightning_dim) plutôt que sur la
+  # présence d'un template allumé qu'on n'a pas. brightness_min retiré : on
+  # n'utilise plus la mesure de luminosité pour cette ability, cf. hooks.py
+  # tariq state_update_fn.
+  # cooldown_ms:6100 était une estimation -- vraie valeur confirmée par
+  # l'utilisateur : 5.92s.
+  - name: chain_lightning
+    priority_st: 7
+    priority_cleave: 3
+    priority_aoe: 3
+    cooldown_ms: 5920
+    skip_detection: true
+    condition: not fury_above:85, not debuff:chain_lightning_dim
+
+  # Condition ajoutée (2026-07-12) : l'utilisateur veut wild_swing comme pur filler
+  # -- utilisé seulement quand rien d'autre n'est disponible ET que la rage
+  # est basse, pas quand elle est déjà pleine/proche du cap. Confirmé dans
+  # debug.log AVANT ce fix : 602 presses de wild_swing, dont 71 (12%) à
+  # fury=100% pile -- du gaspillage (rien à gagner à builder de la rage déjà
+  # au plafond). La priorité la plus basse (8) garantit déjà "rien d'autre
+  # disponible" ; not fury_above:90 ajoute la 2e condition "rage basse".
+  - name: wild_swing
+    priority_st: 8
+    priority_cleave: 7
+    priority_aoe: 7
+    cooldown_ms: 1
+    skip_detection: true
+    blind_sweep: true
+    condition: not fury_above:90
+
+burst_sequence:
+  - focused_wrath
+  - thunder_call

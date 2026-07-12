@@ -1,0 +1,48 @@
+# =============================================================================
+# warden.yaml — config du moteur wardenbot (dialecte proche de Warden.yaml,
+# adapté pour laisser hooks.py piloter tout le combo system).
+# =============================================================================
+# Seules les 1res pièces de combo (earth_fist, wind_kick) + les abilities
+# hors-combo (stone_shield, shatter_earth, serenity) passent par le scan de
+# priorité normal. Tout le reste (spirit_palm, les 2e pièces *_2, le
+# finisher) est piloté par meiko_pre_tick -- inutile de leur donner une
+# priorité ici, ils ne sont même pas listés.
+# =============================================================================
+
+gcd_ms: 1100
+
+abilities:
+  - name: stone_shield
+    priority_st: 0
+    priority_aoe: 0
+    off_gcd: true
+    condition: "flag:need_shield"
+    cooldown_ms: 1
+    skip_detection: true
+
+  - name: shatter_earth
+    priority_st: 1
+    priority_aoe: 1
+    cooldown_ms: 60000
+
+  # ST (1-2 cibles) : Earth Fist en premier -> Rising Earth / Earthfist Barrage
+  - name: earth_fist
+    priority_st: 2
+    priority_aoe: 4
+    cooldown_ms: 1
+    skip_detection: true
+
+  # AoE (3+ cibles) : Wind Kick en premier -> Rising Storm / Lashing Stormkick
+  # (c'est ce combo qui stack Warden of the Temple)
+  - name: wind_kick
+    priority_st: 4
+    priority_aoe: 2
+    cooldown_ms: 1
+    skip_detection: true
+
+  - name: serenity
+    priority_st: 10
+    priority_aoe: 10
+    off_gcd: true
+    cooldown_ms: 10000
+    condition: "health_below:60"
