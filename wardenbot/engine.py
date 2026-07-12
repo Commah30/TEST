@@ -14,6 +14,7 @@ pense que le hook fait ça".
 from __future__ import annotations
 
 import time
+import traceback
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -289,6 +290,7 @@ class RotationEngine:
         tick_hz: float = 30.0,
         on_tick: Optional[Callable[[Optional[str]], None]] = None,
         is_paused: Optional[Callable[[], bool]] = None,
+        on_error: Optional[Callable[[BaseException], None]] = None,
     ):
         """
         Boucle principale. tick_hz = fréquence d'évaluation (pas de press).
@@ -299,12 +301,32 @@ class RotationEngine:
         (pause totale, pas juste un no-op sur press_fn qui laisserait l'état
         interne du combo dériver du vrai jeu). on_tick continue d'être appelé
         même en pause -- sert par ex. à lire une touche de reprise.
+
+        on_error(exc) : appelé si self.tick() lève une exception (frame de
+        capture invalide, glitch matcher/YOLO, etc.) -- SANS ça, une seule
+        exception dans un tick tuerait tout le bot en pleine partie (rien ne
+        rattrapait KeyboardInterrupt à part le Ctrl+C). Le tick fautif est
+        traité comme "rien pressé" (pressed=None) et la boucle continue au
+        tick suivant, plutôt que de planter tout le process pour un incident
+        probablement transitoire (capture d'écran, inférence GPU). Si
+        non fourni, imprime juste la trace (comportement visible en console,
+        pas de crash silencieux).
         """
         period = 1.0 / tick_hz
         try:
             while True:
                 start = time.monotonic()
-                pressed = None if (is_paused is not None and is_paused()) else self.tick()
+                if is_paused is not None and is_paused():
+                    pressed = None
+                else:
+                    try:
+                        pressed = self.tick()
+                    except Exception as exc:
+                        pressed = None
+                        if on_error is not None:
+                            on_error(exc)
+                        else:
+                            traceback.print_exc()
                 if on_tick is not None:
                     on_tick(pressed)
                 elapsed = time.monotonic() - start

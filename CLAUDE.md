@@ -41,20 +41,28 @@ barre d'abilities), ne pas changer sans nouvelle mesure.
 ## Architecture
 
 ```
-main.py                  point d'entrée, wiring KEY_MAP/REGIONS, build_engine()
+main.py                    point d'entrée : build_engine(), boucle de debug (logger/hotkeys), __main__
 config/warden.yaml        les 5 abilities scannées par priorité normale
 test_wardenbot.py         tests de logique pure (aucun écran requis)
 capture_helper.py         utilitaire Windows (ctypes) : trouver régions + capturer templates PNG
 detect_check.py           affiche en direct le score de confiance de chaque template
-requirements.txt          pyyaml, mss, opencv-python-headless, pydirectinput, numpy, torch/torchvision (CUDA cu126), easyocr
+requirements.txt          pyyaml, mss, opencv-python-headless, pydirectinput, numpy, torch/torchvision (CUDA cu126), easyocr, ultralytics
 wardenbot/
-  engine.py                State, Ability, RotationEngine (le tick loop)
-  hooks.py                 *** LA logique combo Meiko, en Python lisible ***
-  capture.py                capture d'écran (mss)
-  matcher.py                template matching (OpenCV, seuil défaut 0.70)
-  input_sim.py               simulation de touches (pydirectinput, PAS pyautogui)
-templates/                  PNG capturés (pas versionnés a priori)
+  engine.py                 State, Ability, RotationEngine (le tick loop)
+  hooks.py                  *** LA logique combo Meiko, en Python lisible ***
+  game_config.py             KEY_MAP, REGIONS, CHARACTERS (donnée + wiring par perso)
+  state_update.py            lecture d'écran -> state, par perso (extrait de main.py le 2026-07-12)
+  diagnostics.py             watchdog (appels lents) + log_error (exceptions non fatales)
+  capture.py                 capture d'écran (mss)
+  matcher.py                 template matching (OpenCV, seuil défaut 0.70)
+  input_sim.py                simulation de touches (pydirectinput, PAS pyautogui)
+templates/                   PNG capturés (pas versionnés a priori)
 ```
+
+Le projet couvre aussi un second personnage, **Tariq** (`config/tariq.yaml`,
+`hooks.py::tariq_pre_tick`, YOLO + EasyOCR pour la détection) — cf.
+README.md pour le détail, ce fichier CLAUDE.md documente surtout la
+mécanique Meiko d'origine du projet.
 
 ### `wardenbot/engine.py`
 - `State` : last_cast, last_cast_time, cast_history, cooldown_until,
@@ -78,12 +86,26 @@ désignent la 2e pièce d'un combo (même touche physique que la version sans
 suffixe, cf. `KEY_MAP`). Utile car Wind Kick/Earth Fist/Spirit Palm jouent
 chacun un rôle différent selon le contexte (ouvreur vs 2e pièce).
 
-### `main.py`
+### `wardenbot/game_config.py` (anciennement dans `main.py`, extrait le 2026-07-12)
 `KEY_MAP` (nom logique → touche réelle) et `REGIONS` (nom logique → dict
 région écran `{left, top, width, height}`) sont **édités à la main par
 l'utilisateur au fur et à mesure des captures — ne jamais écraser ce fichier en
-entier, toujours diff/merge**. `make_state_update_fn` lit l'écran à chaque
-tick et remplit `state.resources`/`state.debuffs`/`state.buffs`.
+entier, toujours diff/merge**. `CHARACTERS` relie chaque perso à son YAML,
+ses templates, ses hooks et sa fabrique de `state_update_fn` (celles-ci
+vivent dans `wardenbot/state_update.py`, qui lit l'écran à chaque tick/cycle
+et remplit `state.resources`/`state.debuffs`/`state.buffs`).
+
+### Robustesse (ajouté le 2026-07-12)
+`RotationEngine.run_forever(on_error=...)` rattrape toute exception levée
+par `tick()` (frame de capture invalide, glitch matcher/YOLO...) au lieu de
+laisser planter tout le bot en pleine partie — `main.py` journalise via
+`wardenbot/diagnostics.py::log_error` (fichier `error.log`, gitignored) et
+la boucle continue au tick suivant. Même principe côté thread de détection
+Tariq (`wardenbot/state_update.py::_run_detection_worker`) : un cycle qui
+échoue est journalisé et retenté, plutôt que de tuer silencieusement le
+thread daemon (ce qui gèlerait `state_update_fn` sur le dernier snapshot
+connu indéfiniment, sans aucun crash visible — un des pièges "ça a l'air
+figé sans raison" déjà chassés sur ce projet).
 
 ## Bugs déjà rencontrés et corrigés (ne pas réintroduire)
 

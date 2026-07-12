@@ -2,6 +2,7 @@
 # aucune valeur en historique (pure diff-noise).
 debug.log
 capture_watchdog.log
+error.log
 
 # Python
 __pycache__/

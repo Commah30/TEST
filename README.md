@@ -43,7 +43,7 @@ abilities scannent leurs conditions (`fury_above:N`, `flag:X`, `buff:X`,
 ## Architecture
 
 ```
-main.py                    point d'entrée, wiring KEY_MAP/REGIONS, build_engine()
+main.py                    point d'entrée : build_engine(), boucle de debug (logger/hotkeys), __main__
 config/warden.yaml           les abilities de Meiko (combo + hors-combo)
 config/tariq.yaml            la rotation de Tariq (liste de priorité)
 test_wardenbot.py            tests de logique pure Meiko (aucun écran requis)
@@ -60,6 +60,9 @@ requirements.txt             pyyaml, mss, opencv-python-headless, pydirectinput,
 wardenbot/
   engine.py                  State, Ability, RotationEngine (le tick loop)
   hooks.py                   logique de combo/rotation par personnage, en clair
+  game_config.py              KEY_MAP, REGIONS, CHARACTERS (donnée + wiring par perso)
+  state_update.py             lecture d'écran -> state, par perso (capture/matching/YOLO)
+  diagnostics.py              watchdog (appels lents) + log d'erreurs non fatales
   capture.py                 capture d'écran (mss)
   matcher.py                 template matching (OpenCV)
   ocr.py                     lecture de texte/chiffres à l'écran (EasyOCR)
@@ -88,8 +91,8 @@ s'appuient sur `ctypes.windll`, pas de fallback cross-plateforme).
 
 1. Capture les templates PNG nécessaires (`templates/<perso>/`) et calibre
    les régions écran (`capture_helper.py mark`, ou clic droit sur une
-   capture d'écran) dans `REGIONS[<perso>]` (`main.py`).
-2. Remplis `KEY_MAP[<perso>]` avec tes vraies touches.
+   capture d'écran) dans `REGIONS[<perso>]` (`wardenbot/game_config.py`).
+2. Remplis `KEY_MAP[<perso>]` (`wardenbot/game_config.py`) avec tes vraies touches.
 3. Pour Tariq, si tu ajoutes/recalibres la détection des buffs : construis
    un dataset (`build_yolo_dataset.py`) et entraîne (`train_yolo.py`) avant
    de rebrancher `yolo_detect.detect()`.
@@ -127,10 +130,24 @@ Doivent passer avant tout refactor de `hooks.py` ou `engine.py`.
 
 ## Détection en thread séparé (Tariq)
 
-`main.py::make_tariq_state_update_fn` fait tourner la capture/matching/
-YOLO/OCR dans un **thread dédié** (10-15Hz), qui publie un instantané
-immuable régulièrement. Le thread principal (jusqu'à 60Hz) ne fait que
-lire ce dernier instantané et décider/presser — jamais de calcul lourd
-dans la boucle de décision elle-même. Ça évite qu'un pic d'inférence GPU
+`wardenbot/state_update.py::make_tariq_state_update_fn` fait tourner la
+capture/matching/YOLO/OCR dans un **thread dédié** (10-15Hz), qui publie un
+instantané immuable régulièrement. Le thread principal (jusqu'à 60Hz) ne
+fait que lire ce dernier instantané et décider/presser — jamais de calcul
+lourd dans la boucle de décision elle-même. Ça évite qu'un pic d'inférence GPU
 (YOLO/EasyOCR peuvent occasionnellement prendre 1-3s au lieu de ~20-30ms)
 ne bloque toute la rotation.
+
+## Robustesse
+
+Une exception dans un tick (frame de capture invalide, glitch matcher/YOLO)
+ne fait plus planter tout le bot en pleine partie :
+
+- `RotationEngine.run_forever(on_error=...)` rattrape toute exception levée
+  par `tick()`, journalise (`main.py` -> `wardenbot/diagnostics.py::log_error`
+  -> `error.log`) et continue au tick suivant.
+- Le thread de détection Tariq (`wardenbot/state_update.py::_run_detection_worker`)
+  applique le même principe autour de chaque cycle de détection : un cycle
+  qui échoue est journalisé et retenté, plutôt que de tuer silencieusement
+  le thread daemon (ce qui aurait figé `state_update_fn` sur le dernier
+  instantané connu indéfiniment, sans aucun crash visible).
