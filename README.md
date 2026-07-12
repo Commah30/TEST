@@ -1,59 +1,136 @@
 # wardenbot
 
-Moteur de rotation minimal pour Meiko (Fellowship), pensé pour remplacer la
-partie "combo decision", auparavant gérée par des hooks opaques, par du
-Python que tu contrôles entièrement.
-Le problème qu'on n'arrivait pas à trancher (est-ce que la logique choisit
-Vortex ou Strikes au moment du 3e stack de Warden of the Temple ?) est réglé
-par construction : c'est un `if`/`else` dans `hooks.py` que tu lis toi-même,
-pas une boîte noire.
+Moteur de rotation Python pour deux personnages sur **Fellowship** :
+**Meiko** (Warden, combo defensif) et **Tariq** (Spam V2, rotation en liste
+de priorité). Remplace des hooks de décision opaques par du code Python que
+tu contrôles et lis toi-même — la logique de rotation n'est jamais une
+boîte noire.
 
-Tests validés (`python test_wardenbot.py`) : la logique "3 stacks -> Vortex
-même si Strikes a un timer plus bas" est déterministe et vérifiée sans écran
-ni jeu.
+Détection 100% par capture d'écran (jamais de lecture mémoire du jeu) :
+template matching OpenCV, un détecteur YOLO entraîné pour les buffs qui se
+ressemblent trop pour le template matching, et EasyOCR pour le texte/les
+chiffres à l'écran.
+
+## Les deux personnages
+
+### Meiko (`config/warden.yaml`, `hooks.py::meiko_pre_tick`)
+
+Complète un combo en cours (1re pièce → 2e pièce → Fighting Techniques,
+finisher universel off-GCD). La décision "Spirited Vortex ou Spirited
+Strikes ?" au 3e stack de Warden of the Temple est un simple `if`/`else`
+lisible, pas un hook opaque.
+
+### Tariq (`config/tariq.yaml`, `hooks.py::tariq_pre_tick`)
+
+Rotation en liste de priorité classique (pas de séquence à compléter). Les
+abilities scannent leurs conditions (`fury_above:N`, `flag:X`, `buff:X`,
+`debuff:X`) dans l'ordre de priorité à chaque tick. Points notables :
+
+- **Hammer Storm** part sur n'importe quel proc détecté, immédiatement (pas
+  d'attente d'un 2e stack — le jeu n'affiche jamais "2" sur ce badge).
+- **Focused Wrath** réduit de 50% le coût en Fury des 2 prochains Hammer
+  Storm/Skull Crusher (mécanique vérifiée sur le wiki officiel) — consommé
+  dès que le seuil réduit est atteint plutôt que d'attendre le seuil plein.
+- **Wild Swing** est un pur filler : seulement quand rien d'autre n'est
+  disponible et que la Fury n'est pas déjà pleine.
+- Détection de buffs par **YOLO** (`wardenbot/yolo_detect.py`) plutôt que
+  template matching : `hammer_storm_buff` et `skull_crusher_buff` partagent
+  le même artwork et se faisaient confondre par `cv2.matchTemplate` — un
+  modèle entraîné sur un dataset semi-auto-labellisé (`build_yolo_dataset.py`
+  + `train_yolo.py`) les sépare correctement, y compris 3 buffs actifs en
+  même temps.
+
+## Architecture
+
+```
+main.py                    point d'entrée, wiring KEY_MAP/REGIONS, build_engine()
+config/warden.yaml           les abilities de Meiko (combo + hors-combo)
+config/tariq.yaml            la rotation de Tariq (liste de priorité)
+test_wardenbot.py            tests de logique pure Meiko (aucun écran requis)
+test_tariq.py                tests de logique pure Tariq (aucun écran requis)
+tick_timing_test.py          mesure la durée réelle d'un tick (capture+YOLO+OCR+logique)
+capture_helper.py            utilitaire Windows : trouver régions + capturer templates PNG
+detect_check.py              affiche en direct le score de confiance de chaque template
+ocr_check.py                 affiche en direct ce qu'EasyOCR lit dans une région
+yolo_check.py                affiche en direct ce que le modèle YOLO détecte
+build_yolo_dataset.py        construit un dataset YOLO à partir d'un clip vidéo
+train_yolo.py                entraîne un modèle YOLO sur ce dataset
+requirements.txt             pyyaml, mss, opencv-python-headless, pydirectinput,
+                              numpy, torch/torchvision (CUDA), easyocr, ultralytics
+wardenbot/
+  engine.py                  State, Ability, RotationEngine (le tick loop)
+  hooks.py                   logique de combo/rotation par personnage, en clair
+  capture.py                 capture d'écran (mss)
+  matcher.py                 template matching (OpenCV)
+  ocr.py                     lecture de texte/chiffres à l'écran (EasyOCR)
+  yolo_detect.py              inférence du modèle YOLO entraîné
+  bar_reader.py               lecture du % de remplissage d'une barre par scan de pixels
+  input_sim.py                simulation de touches (pydirectinput), timing humanisé
+templates/                    PNG capturés par personnage
+dataset_tariq_buffs/          dataset d'entraînement YOLO (images + labels)
+runs/detect/                  résultats d'entraînement YOLO (poids inclus)
+```
 
 ## Installation
 
 ```
-pip install -r requirements.txt --break-system-packages   # si besoin sur Linux
+pip install -r requirements.txt
 ```
 
-## Structure
+`torch`/`torchvision` sont installés depuis l'index CUDA (`cu126`) pour
+utiliser le GPU si disponible — sinon EasyOCR/YOLO retombent sur le CPU
+(plus lent, mais fonctionnel).
 
-- `wardenbot/capture.py` — capture d'écran (mss)
-- `wardenbot/matcher.py` — template matching (OpenCV)
-- `wardenbot/input_sim.py` — simulation de touches (pydirectinput)
-- `wardenbot/engine.py` — moteur : chargement YAML, conditions, scan de
-  priorité, boucle principale
-- `wardenbot/hooks.py` — **la logique combo Meiko, à lire/modifier toi-même**
-- `config/warden.yaml` — les abilities hors-combo (Stone Shield, Shatter
-  Earth, Serenity) + les 1res pièces de combo (Earth Fist, Wind Kick)
-- `main.py` — assemble tout, à adapter avec tes touches/régions réelles
-- `test_wardenbot.py` — preuve que la décision 3-stacks fonctionne, sans jeu
+Windows uniquement (`capture_helper.py` et la détection de touches
+s'appuient sur `ctypes.windll`, pas de fallback cross-plateforme).
 
-## Ce qui manque avant de tourner en jeu réel
+## Avant de lancer en jeu réel
 
-1. **Templates** : capture une image PNG par ability + par état à détecter
-   (dont `warden_of_the_temple_3`, l'icône du debuff à 3 stacks) dans
-   `templates/`.
-2. **Régions** : remplis `REGIONS` dans `main.py` avec les coordonnées
-   écran de chaque icône (left/top/width/height).
-3. **Touches** : remplis `KEY_MAP` dans `main.py` avec tes vrais binds.
-4. **Ressources** : `state.resources["stormfall"]` / `["earthfall"]` doivent
-   être mis à jour par TA détection (lecture des orbes de charge) — pour
-   l'instant rien ne les alimente automatiquement, `is_ready_fn`/detection à
-   brancher dans `main.py`.
-5. **Debuff 3-stacks** : idem, `state.debuffs["warden_of_the_temple_3"]` doit
-   être mis à jour par un vrai match du template capturé, pas codé en dur.
-6. Teste d'abord avec `dry_run=True` (juste des `print`), vérifie que la
-   séquence affichée en jeu réel (regarde les logs) correspond à ce que
-   `test_wardenbot.py` prédit, PUIS seulement passe en `dry_run=False`.
+1. Capture les templates PNG nécessaires (`templates/<perso>/`) et calibre
+   les régions écran (`capture_helper.py mark`, ou clic droit sur une
+   capture d'écran) dans `REGIONS[<perso>]` (`main.py`).
+2. Remplis `KEY_MAP[<perso>]` avec tes vraies touches.
+3. Pour Tariq, si tu ajoutes/recalibres la détection des buffs : construis
+   un dataset (`build_yolo_dataset.py`) et entraîne (`train_yolo.py`) avant
+   de rebrancher `yolo_detect.detect()`.
+4. Lance d'abord avec `dry_run=True` dans `main.py` (juste des `print`,
+   aucune touche pressée) pour vérifier que les bonnes abilities sortent au
+   bon moment, en comparant à `debug.log`. Passe en `dry_run=False`
+   seulement une fois confiant.
 
-## Pourquoi Python / mss / OpenCV / pydirectinput
+## Tests
 
-- `mss` : capture d'écran nettement plus rapide que `pyautogui.screenshot()`
-  en boucle serrée.
-- OpenCV `cv2.matchTemplate` : principe de confidence 0.0-1.0 classique
-  (`detection.buff_threshold` etc.).
-- `pydirectinput` plutôt que `pyautogui` pour l'envoi de touches : plus
-  fiable sur les jeux qui ignorent les événements `SendInput` classiques.
+```
+python test_wardenbot.py
+python test_tariq.py
+```
+
+Aucune dépendance lourde (écran, GPU, OpenCV) : logique pure, testée contre
+des `State` simulés et le vrai `config/tariq.yaml`/`config/warden.yaml`.
+Doivent passer avant tout refactor de `hooks.py` ou `engine.py`.
+
+## Pourquoi ces choix techniques
+
+- **mss** : capture d'écran nettement plus rapide que
+  `pyautogui.screenshot()` en boucle serrée.
+- **OpenCV `cv2.matchTemplate`** : confidence 0.0-1.0 classique, suffisant
+  tant que les icônes à distinguer ne se ressemblent pas trop.
+- **YOLO (ultralytics)** : quand le template matching confond deux icônes
+  au même artwork — un détecteur entraîné apprend la distinction que la
+  simple corrélation de pixels ne peut pas faire.
+- **EasyOCR** plutôt que Tesseract/PaddleOCR : tourne sur `torch`/CUDA (GPU
+  déjà nécessaire pour YOLO) ; PaddleOCR a été écarté faute de wheel
+  compatible avec la version de Python de cette machine.
+- **pydirectinput** plutôt que `pyautogui` : utilise `SendInput` avec des
+  scan codes bas niveau, fiable sur des jeux qui ignorent les événements
+  `SendMessage` classiques.
+
+## Détection en thread séparé (Tariq)
+
+`main.py::make_tariq_state_update_fn` fait tourner la capture/matching/
+YOLO/OCR dans un **thread dédié** (10-15Hz), qui publie un instantané
+immuable régulièrement. Le thread principal (jusqu'à 60Hz) ne fait que
+lire ce dernier instantané et décider/presser — jamais de calcul lourd
+dans la boucle de décision elle-même. Ça évite qu'un pic d'inférence GPU
+(YOLO/EasyOCR peuvent occasionnellement prendre 1-3s au lieu de ~20-30ms)
+ne bloque toute la rotation.
