@@ -307,8 +307,32 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
 
     def _run_detection_worker(stop_event: threading.Event) -> None:
         period = 1.0 / TARIQ_DETECTION_WORKER_HZ
+        last_cycle_start = None
         while not stop_event.is_set():
             start = time.monotonic()
+            # BUG TROUVÉ EN JEU (2026-07-12) : analyse de debug.log d'une vraie
+            # session -- 6 épisodes de 8 à 24s où TOUT le snapshot (fury,
+            # chain_lightning_dim, culling_strike_dim...) reste figé à
+            # l'identique, alors que le thread principal continue de ticker
+            # normalement (~60Hz sans interruption) -- donc pas un crash, pas
+            # un _detection_cycle() individuellement lent (AUCUNE de ces 6
+            # fenêtres n'apparaît dans capture_watchdog.log). Angle mort de
+            # l'instrumentation précédente : elle ne mesurait QUE la durée de
+            # _detection_cycle() lui-même, jamais le temps passé DANS
+            # stop_event.wait() ni un éventuel retard de réveil du thread par
+            # l'OS -- un blocage à cet endroit serait invisible. Ce check compare le
+            # début de CE cycle au début du précédent (donc cycle précédent +
+            # son wait() inclus) : si l'écart dépasse largement period
+            # (~67ms), quelque chose a empêché ce thread de tourner, quelle
+            # que soit la raison exacte -- journalisé séparément de "cycle
+            # complet" pour distinguer "le travail a pris du temps" de "le
+            # thread n'a simplement pas été réveillé/exécuté à temps".
+            if last_cycle_start is not None:
+                gap = start - last_cycle_start
+                if gap > CAPTURE_WATCHDOG_THRESHOLD_S:
+                    log_slow_call("_run_detection_worker (intervalle entre cycles)", gap)
+            last_cycle_start = start
+
             # ROBUSTESSE (2026-07-12) : un thread daemon Python qui lève une
             # exception non rattrapée meurt SILENCIEUSEMENT -- pas de
             # traceback visible en jeu (juste un warning éventuel dans une
