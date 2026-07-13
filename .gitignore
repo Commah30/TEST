@@ -3,6 +3,9 @@
 debug.log
 capture_watchdog.log
 error.log
+focus_check.log
+input_timing.log
+press_confirm.log
 
 # Python
 __pycache__/
@@ -32,3 +35,4 @@ burst/
 # Captures de calibration ponctuelles/debug, écrasées à chaque usage
 scratch_ragebar_001.png
 yolo_check_debug.png
+scratch_video_buffcheck.png

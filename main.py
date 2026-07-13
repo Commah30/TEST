@@ -49,10 +49,10 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8")
 
 from wardenbot.capture import ScreenCapture
-from wardenbot.diagnostics import log_error
+from wardenbot.diagnostics import check_foreground_window, log_error
 from wardenbot.engine import RotationEngine, State, load_abilities
 from wardenbot.game_config import CHARACTERS, KEY_MAP, REGIONS
-from wardenbot.input_sim import InputSimulator
+from wardenbot.input_sim import InputSimulator, InputWorker
 from wardenbot.matcher import TemplateMatcher
 from wardenbot.state_update import TARIQ_BUFF_BAR_THRESHOLDS  # noqa: F401 -- re-exporté, cf. build_yolo_dataset.py
 
@@ -151,7 +151,7 @@ def make_debug_reset_hotkey(state: State) -> Callable[[], None]:
 VK_C = 0x43
 
 
-def make_pause_toggle() -> tuple[Callable[[], bool], Callable[[], None]]:
+def make_pause_toggle(on_toggle: Optional[Callable[[bool], None]] = None) -> tuple[Callable[[], bool], Callable[[], None]]:
     """
     C en jeu : active/désactive la rotation sans relancer le script. En
     pause, RotationEngine.run_forever() saute complètement tick() (cf.
@@ -160,6 +160,16 @@ def make_pause_toggle() -> tuple[Callable[[], bool], Callable[[], None]]:
     Retourne (is_paused, check_toggle_hotkey) : is_paused se passe à
     run_forever(is_paused=...), check_toggle_hotkey se branche sur on_tick
     (il doit tourner MÊME en pause pour pouvoir détecter la reprise).
+
+    on_toggle(is_now_paused) : AJOUTÉ (2026-07-13) -- avant ça, la pause
+    n'était imprimée qu'en console, jamais journalisée. Un long silence dans
+    debug.log (fury/skip_trace figés, GCD qui part largement négatif -- cf.
+    session du 2026-07-13, ~32s et ~4m52 de "gel" qui ressemblaient à un bug
+    de détection) était en fait indissociable d'une vraie pause volontaire
+    sans preuve écrite après coup -- fallait redemander à l'utilisateur. on_toggle
+    permet à main.py d'écrire un marqueur DANS debug.log au moment exact du
+    toggle, visible directement à côté des ticks concernés (pas un fichier
+    séparé à recorréler à la main).
     """
     toggle_state = {"paused": False}
     pressed_last = False
@@ -173,6 +183,8 @@ def make_pause_toggle() -> tuple[Callable[[], bool], Callable[[], None]]:
         if down and not pressed_last:
             toggle_state["paused"] = not toggle_state["paused"]
             print(f"[main] C -- rotation {'EN PAUSE' if toggle_state['paused'] else 'ACTIVE'}")
+            if on_toggle is not None:
+                on_toggle(toggle_state["paused"])
         pressed_last = down
 
     return is_paused, check_toggle_hotkey
@@ -190,6 +202,27 @@ def build_engine(character: str, dry_run: bool = True) -> RotationEngine:
     capturer = ScreenCapture() if not dry_run else None
     input_sim = InputSimulator(dry_run=dry_run)
 
+    # Décision/input séparés (2026-07-13) : avant, press_fn() appelait
+    # input_sim.press() directement et de façon BLOQUANTE -- keyDown/
+    # sleep(30-90ms, plus pour un combo modificateur)/keyUp tournaient sur
+    # le MÊME thread que RotationEngine.tick(), gelant la boucle de décision
+    # (60Hz = budget 16.67ms/tick pour Tariq) pendant tout le hold. Même
+    # goulot que celui déjà résolu côté détection (cf. state_update.py),
+    # jamais traité côté input jusqu'ici. InputWorker fait tourner
+    # l'exécution physique des touches sur son propre thread, avec une
+    # queue -- press_fn() devient un simple enqueue quasi instantané.
+    #
+    # on_before_press=check_foreground_window déplacé ICI (dans le thread
+    # d'input, juste avant la vraie presse) plutôt qu'au moment de la
+    # décision -- plus précis : vérifie l'état du focus au moment où la
+    # touche part VRAIMENT, pas au moment où le tick l'a décidée (la queue
+    # peut, rarement, introduire un léger décalage entre les deux).
+    def _check_focus_before_press(name: str) -> None:
+        if not dry_run:
+            check_foreground_window(name)
+
+    input_worker = InputWorker(input_sim, on_before_press=_check_focus_before_press)
+
     def press_fn(name: str) -> None:
         key = key_map.get(name)
         if key is None:
@@ -202,7 +235,7 @@ def build_engine(character: str, dry_run: bool = True) -> RotationEngine:
         # les procs/cooldowns où la marge anti-GCD-raté compte plus que
         # quelques ms économisés.
         light = name in ("wild_swing", "skull_crusher")
-        input_sim.press(key, label=name, light=light)
+        input_worker.request_press(key, label=name, light=light)
 
     def is_ready_fn(name: str, confidence_threshold: Optional[float] = None) -> bool:
         if dry_run:
@@ -269,6 +302,17 @@ def make_error_handler() -> Callable[[BaseException], None]:
     return on_error
 
 
+def _log_pause_event(paused: bool) -> None:
+    """Écrit un marqueur bien visible DANS debug.log au moment exact d'un
+    toggle pause/reprise (cf. make_pause_toggle::on_toggle) -- pas dedup,
+    toujours écrit, pour rester repérable même si rien d'autre ne change
+    juste avant/après."""
+    marker = "=== PAUSE ACTIVÉE (touche C) ===" if paused else "=== PAUSE DÉSACTIVÉE (touche C) -- reprise ==="
+    line = f"{time.strftime('%H:%M:%S')} {marker}\n"
+    with DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
 if __name__ == "__main__":
     character = choose_character()
     engine = build_engine(character, dry_run=False)  # mettre à True pour tester sans presser de touches
@@ -278,7 +322,7 @@ if __name__ == "__main__":
 
     log_tick = make_debug_logger(engine.state)
     check_reset_hotkey = make_debug_reset_hotkey(engine.state)
-    is_paused, check_pause_hotkey = make_pause_toggle()
+    is_paused, check_pause_hotkey = make_pause_toggle(on_toggle=_log_pause_event)
     on_error = make_error_handler()
 
     def on_tick(pressed: Optional[str]) -> None:

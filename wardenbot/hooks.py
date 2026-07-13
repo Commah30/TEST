@@ -54,6 +54,7 @@ import time
 from typing import Optional
 
 from .engine import State
+from wardenbot.diagnostics import log_press_confirmation
 
 FINISHER_DELAY_S = 0.15   # laisse au jeu le temps d'enregistrer la 2e pièce
 WARDEN_STACKS_TO_EMPOWER = 3
@@ -281,13 +282,22 @@ HAMMER_STORM_LOCK_REFRESH_S = 0.2   # marge au-delà du tick courant -- absorbe 
 # BUG TROUVÉ EN JEU (2026-07-12) : "hammerstorm ne fire pas quand il devrait"
 # -- vérifié sur fellowship.wiki.fextralife.com/Focused+Wrath : "Your next
 # two casts of Skull Crusher or Hammer Storm cost 50% less Fury". Tant que
-# focused_wrath_empowered est actif, la condition YAML fury_above:50/23
+# focused_wrath_empowered est actif, la condition YAML fury_above:55/23
 # (coût plein) est trop stricte : elle bloque un proc dont le VRAI coût,
 # réduit de 50%, est déjà couvert. Seuils réduits ci-dessous, vérifiés en
 # général (pas liés aux stacks) puisque le buff peut venir du bot ou de Leap
 # Smash castée manuellement par l'utilisateur.
-HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED = 25.0
-SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED = 12.0   # config/tariq.yaml : fury_above:23 (coût plein) / 2
+#
+# MARGE AJOUTÉE (2026-07-13, cf. config/tariq.yaml::hammer_storm_proc) :
+# même bruit de mesure identifié sur le seuil plein (échecs de cast
+# confirmés entre 50.4% et 53.2% malgré une condition à 50) s'applique
+# potentiellement ici -- marge proportionnelle (+5, comme 50->55) appliquée
+# par précaution, MAIS pas confirmée par des logs sur CE seuil précis (le
+# seul échec observé côté discount, à 34.8%, est déjà largement au-dessus de
+# l'ancien seuil de 25 -- autre cause possible, pas expliquée par le bruit
+# de mesure autour du seuil). À surveiller.
+HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED = 30.0
+SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED = 12.0   # config/tariq.yaml : fury_above:23 (coût plein) / 2 -- pas de signal de détection dédié pour confirmer un cast Skull Crusher, donc pas de preuve pour ajuster ce seuil comme les deux ci-dessus (cf. skull_crusher_proc, non touché)
 
 # BUG TROUVÉ EN JEU (2026-07-13, rapporté par l'utilisateur) : hammer_storm_proc
 # consommé (ready -> False dans tariq_post_tick) sur la seule foi d'avoir
@@ -326,9 +336,174 @@ SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED = 12.0   # config/tariq.yaml : fury
 # détection.
 HAMMER_STORM_PROC_CONFIRM_WINDOW_S = 0.5   # marge après la presse pour laisser le jeu démarrer la canalisation avant de considérer que le press a échoué
 
+# =============================================================================
+# PLANNER (2026-07-13, discuté avec l'utilisateur) -- au-dessus des priorités fixes
+# de config/tariq.yaml, une SECONDE question : pas "que puis-je presser
+# maintenant ?" mais "qu'est-ce que je suis en train de préparer ?".
+#
+# CE N'EST PAS une Behavior Tree ni un scoring général (cf. audit
+# 2026-07-13 : rejetés faute de preuve qu'un vrai problème de PRIORITÉ existe
+# aujourd'hui). C'est un objectif temporaire (state.flags["tariq_objective"])
+# qui active/désactive quelques flags -- lus par les conditions YAML
+# existantes exactement comme n'importe quel autre flag du projet
+# (warden_stacks, hammer_storm_proc_ready...). Les priorités elles-mêmes ne
+# changent JAMAIS : un flag change juste quelles conditions passent.
+#
+# Preuve concrète du problème que ça résout (debug.log, audit 2026-07-13) :
+# focused_wrath et thunder_call partent aujourd'hui chacun dès que LEUR
+# PROPRE cooldown le permet, sans coordination -- écarts réels observés de
+# 22s et 27s entre les deux au lieu d'un burst empilé. Le champ
+# `burst_sequence` du YAML exprimait déjà cette intention mais n'était lu
+# nulle part (grep confirmé, zéro référence dans wardenbot/*.py ni main.py).
+# Ceci est la première vraie implémentation de cette intention.
+#
+# Règle "prepare_burst" : si l'un des deux (focused_wrath/thunder_call) est
+# prêt (hors cooldown) et que l'autre le sera dans moins de
+# BURST_PREP_WINDOW_S, on RETIENT le premier (flag burst_hold, lu par la
+# condition YAML des deux) au lieu de le tirer seul -- jusqu'à ce que les
+# DEUX soient prêts (burst déclenché : le scan normal les presse l'un après
+# l'autre, à un tick d'écart tout au plus puisque tous deux off_gcd) ou que
+# la fenêtre soit dépassée (sécurité anti-blocage : timeout, cf. plus bas --
+# ne reste jamais bloqué si un cooldown dérive plus que prévu).
+#
+# fury_conserve : pendant cette attente, on retient AUSSI la dépense
+# discrétionnaire de Fury (skull_crusher normal, le filler qui dépense sans y
+# être forcé) pour que la Fury soit maximale au moment où le burst
+# démarre -- Focused Wrath réduit de 50% le coût des 2 prochains Hammer
+# Storm/Skull Crusher (cf. HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED plus
+# haut), donc plus de Fury en stock au moment du burst = plus de valeur tirée
+# de cette fenêtre. Les GÉNÉRATEURS (face_breaker/chain_lightning/wild_swing)
+# ne sont PAS retenus : ils doivent au contraire continuer à builder de la
+# Fury pendant l'attente, sinon le burst démarrerait avec MOINS de ressource
+# que possible -- l'inverse de l'objectif. Les PROCS (hammer_storm_proc/
+# skull_crusher_proc) ne sont pas non plus concernés : règle historique du
+# projet "aucun proc ne doit rater", jamais retenus par le planner.
+# =============================================================================
+BURST_PREP_WINDOW_S = 8.0   # au-delà, retenir le premier reviendrait à geler la rotation trop longtemps pour un gain incertain -- fenêtre courte, seulement les tout derniers instants avant l'alignement
+BURST_TIMEOUT_MARGIN_S = 2.0   # marge de sécurité au-delà de BURST_PREP_WINDOW_S avant d'abandonner l'attente -- ne bloque jamais indéfiniment si un cooldown dérive plus que prévu (ex. hard_lock Hammer Storm qui retarde tout pendant l'attente)
+
+
+def _update_tariq_planner(state: State, now: float) -> None:
+    objective = state.flags.get("tariq_objective", "normal")
+
+    fw_ready_in = state.cooldown_until.get("focused_wrath", 0.0) - now
+    tc_ready_in = state.cooldown_until.get("thunder_call", 0.0) - now
+    fw_ready = fw_ready_in <= 0
+    tc_ready = tc_ready_in <= 0
+
+    if objective == "prepare_burst":
+        since = state.flags.get("tariq_objective_since", now)
+        timed_out = now - since > BURST_PREP_WINDOW_S + BURST_TIMEOUT_MARGIN_S
+        if (fw_ready and tc_ready) or timed_out:
+            objective = "normal"
+    elif (fw_ready and 0 < tc_ready_in <= BURST_PREP_WINDOW_S) or (tc_ready and 0 < fw_ready_in <= BURST_PREP_WINDOW_S):
+        objective = "prepare_burst"
+        state.flags["tariq_objective_since"] = now
+
+    state.flags["tariq_objective"] = objective
+    state.flags["burst_hold"] = objective == "prepare_burst"
+    state.flags["fury_conserve"] = objective == "prepare_burst"
+
+
+# =============================================================================
+# CONFIRMATION DE PRESSE PAR VOILE GCD (2026-07-14, discuté avec l'utilisateur) --
+# jusqu'ici, hammer_storm_proc était la SEULE ability avec un vrai accusé de
+# réception côté jeu (la cast bar). Toutes les autres (heavy_strike,
+# wild_swing, face_breaker, skull_crusher, chain_lightning, skull_crusher_proc,
+# et les 3 off_gcd) étaient pressées "à l'aveugle" -- le bot suppose que ça a
+# marché, sans aucun moyen de vérifier. Root cause du signalement de l'utilisateur
+# ("je le vois visuellement, dans le code tu ne le vois pas") : cet angle
+# mort touche TOUTES les abilities, pas seulement Hammer Storm.
+#
+# Le "voile noir décroissant" (cf. wardenbot/state_update.py,
+# GCD_ICON_REGIONS/OFF_GCD_ICON_REGIONS) donne enfin ce signal, pour tout le
+# kit : state.buffs["gcd_veil_active"] (OR partagé sur les 6 abilities à GCD
+# commun) et state.buffs["veil_culling_strike"/"veil_thunder_call"/
+# "veil_focused_wrath"] (propres à chacune des 3 off_gcd, leur voile suit
+# LEUR PROPRE cooldown, pas le GCD partagé).
+#
+# Volontairement PUREMENT DIAGNOSTIC pour l'instant (cf. l'utilisateur : "je ne
+# corrigerais pas encore, juste l'instrumentation") -- ça ne bloque, ne
+# retente, ni ne modifie AUCUNE decision existante (contrairement au
+# mécanisme _hammer_storm_proc_pending, qui lui continue à gater
+# hammer_storm_proc_ready sur la cast bar, inchangé). Ça se contente de
+# logger SUCCESS/PHANTOM_PRESS par presse dans press_confirm.log (cf.
+# diagnostics.py::log_press_confirmation) -- à croiser avec input_timing.log
+# (déjà là, prouve que la touche part proprement côté InputWorker) pour
+# trancher entre les 4 cas de la discussion :
+#   pas de voile + input jamais exécuté -> InputWorker
+#   pas de voile + input exécuté        -> le jeu refuse/ignore
+#   voile présent + sort non lancé      -> logique jeu/GCD/prérequis (ex: cas hammer_storm_proc déjà tracé)
+#   voile présent + sort lancé          -> tout va bien
+# =============================================================================
+PRESS_CONFIRM_WINDOW_S = 1.5   # marge large au-dessus du cycle voile observé (~1-1.15s pour le GCD partagé)
+
+GCD_VEIL_ABILITIES = frozenset({
+    "heavy_strike", "wild_swing", "face_breaker", "skull_crusher",
+    "skull_crusher_proc", "hammer_storm_proc", "chain_lightning",
+})
+OFF_GCD_VEIL_ABILITY_BUFF_KEYS = {
+    "culling_strike": "veil_culling_strike",
+    "thunder_call": "veil_thunder_call",
+    "focused_wrath": "veil_focused_wrath",
+}
+
+
+def _register_press_confirmation(state: State, pressed: str, now: float) -> None:
+    if pressed not in GCD_VEIL_ABILITIES and pressed not in OFF_GCD_VEIL_ABILITY_BUFF_KEYS:
+        return   # ability sans voile suivi (ex: culling_strike/thunder_call/focused_wrath sont dans OFF_GCD_..., donc bien couverts -- seules face_breaker/wild_swing/etc. via GCD_VEIL_ABILITIES et les 3 off_gcd sont trackées)
+    pending = state.flags.setdefault("_press_confirmations_pending", [])
+    pending.append({
+        "ability": pressed,
+        "requested_at_monotonic": now,
+        "requested_at_wall": time.time(),
+    })
+
+
+def _resolve_press_confirmations(state: State, now: float) -> None:
+    # BUG TROUVÉ (2026-07-14, 1re session avec cette instrumentation) : 13 des
+    # 38 PHANTOM_PRESS journalisés coïncidaient EXACTEMENT avec un cycle
+    # pause/reprise (touche C) -- RotationEngine.tick() (donc tariq_pre_tick,
+    # donc CETTE fonction) ne tourne pas du tout pendant une pause, mais
+    # time.monotonic() continue d'avancer en temps réel : au réveil, l'écart
+    # dépasse toujours largement PRESS_CONFIRM_WINDOW_S, donc tout ce qui
+    # était en attente se résolvait instantanément en PHANTOM_PRESS -- alors
+    # que le voile a pu apparaître ET disparaître normalement en jeu pendant
+    # qu'on ne regardait pas. Fix : si l'écart depuis le dernier appel de
+    # cette fonction dépasse largement le rythme normal (~60Hz), la boucle
+    # vient de reprendre après un blocage (pause ou autre) -- on ABANDONNE
+    # les confirmations en attente SANS les journaliser comme un échec
+    # (ininterprétables), plutôt que de produire un faux PHANTOM_PRESS.
+    last_seen = state.flags.get("_press_confirm_last_tick_at")
+    state.flags["_press_confirm_last_tick_at"] = now
+    if last_seen is not None and now - last_seen > 0.5:
+        state.flags["_press_confirmations_pending"] = []
+        return
+
+    pending = state.flags.get("_press_confirmations_pending")
+    if not pending:
+        return
+    still_pending = []
+    for entry in pending:
+        ability = entry["ability"]
+        if ability in GCD_VEIL_ABILITIES:
+            veil_seen = state.buffs.get("gcd_veil_active", False)
+        else:
+            veil_seen = state.buffs.get(OFF_GCD_VEIL_ABILITY_BUFF_KEYS[ability], False)
+
+        if veil_seen:
+            log_press_confirmation(ability, entry["requested_at_wall"], time.time(), "SUCCESS")
+        elif now - entry["requested_at_monotonic"] > PRESS_CONFIRM_WINDOW_S:
+            log_press_confirmation(ability, entry["requested_at_wall"], None, "PHANTOM_PRESS")
+        else:
+            still_pending.append(entry)
+    state.flags["_press_confirmations_pending"] = still_pending
+
 
 def tariq_pre_tick(state: State) -> Optional[str]:
     now = time.monotonic()
+    _update_tariq_planner(state, now)
+    _resolve_press_confirmations(state, now)
     if state.flags.get("hammer_storm_casting", False):
         state.hard_lock_until = max(state.hard_lock_until, now + HAMMER_STORM_LOCK_REFRESH_S)
         if state.flags.get("_hammer_storm_proc_pending", False):
@@ -393,6 +568,7 @@ def tariq_pre_tick(state: State) -> Optional[str]:
 
 
 def tariq_post_tick(state: State, pressed: str) -> None:
+    _register_press_confirmation(state, pressed, time.monotonic())
     if pressed == "hammer_storm_proc":
         # Ne PAS effacer ready ici -- cf. HAMMER_STORM_PROC_CONFIRM_WINDOW_S :
         # seule une canalisation réellement détectée (tariq_pre_tick) confirme

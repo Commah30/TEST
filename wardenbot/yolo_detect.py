@@ -32,7 +32,7 @@ try:
 except ImportError:
     torch = None
 
-YOLO_WEIGHTS_PATH = Path("runs/detect/train-3/weights/best.pt")   # 2026-07-12 : entraîné sur le dataset élargi (4775 images, 3 clips) -- 59 epochs (early stop), P=0.998/R=0.996/mAP50=0.995 toutes classes confondues. train/ et train-2/ obsolètes.
+YOLO_WEIGHTS_PATH = Path("runs/detect/train-5/weights/best.pt")   # 2026-07-13 : dataset élargi avec la session post-fix (skip_detection focused_wrath/thunder_call, seuil fury_above:30) -- 7358 images (5129 + 2229, dont 748 avec buff réel), 36 epochs (early stop, patience=20) -- P=0.992/R=0.997/mAP50=0.995 toutes classes confondues (hammer_storm_buff P=1.00/R=0.99, skull_crusher_buff P=0.987/R=1.00, focused_wrath_buff P=0.99/R=1.00). train-4 reste valide (5129 images, ancien dataset) si besoin de comparaison -- train/, train-2/, train-3/ obsolètes.
 
 _model = None  # singleton paresseux -- cf. docstring, chargement des poids coûteux
 
@@ -71,15 +71,34 @@ def _select_device() -> "int | str":
     return 0 if (torch is not None and torch.cuda.is_available()) else "cpu"
 
 
+# Dernière décomposition par étape d'un appel predict() (préprocess/
+# inférence/postprocess en ms, déjà calculée par ultralytics lui-même dans
+# results[0].speed -- gratuit, pas besoin de la recalculer à la main).
+# AJOUTÉ (2026-07-13) pour le diagnostic multi-étapes de detect() (cf.
+# wardenbot/diagnostics.py::log_pipeline_diagnostic, appelé depuis
+# state_update.py). Effet de bord assumé (module-level, pas thread-safe à
+# 100% en théorie) -- mais detect() n'est appelé que depuis UN SEUL thread
+# (le thread de détection Tariq), jamais concurremment, donc pas de risque
+# réel de lecture pendant une écriture.
+_last_predict_speed_ms: dict[str, float] = {}
+
+
 def detect(frame: np.ndarray, conf: float = 0.4) -> dict[str, float]:
     """Retourne {nom_de_classe: confiance} pour chaque détection au-dessus du
     seuil `conf`. Une classe absente du dict = non détectée. S'il y a
     plusieurs boîtes pour la même classe (ne devrait pas arriver ici, les 3
     buffs occupant des positions distinctes dans la barre), on garde la
-    confiance la plus haute."""
+    confiance la plus haute.
+
+    half=True (2026-07-13) : mesuré sur le modèle réel (train-4) --
+    médiane 11.31ms (FP32) -> 10.95ms (FP16), ~11% de gain sur la seule
+    inférence. Gratuit, pas de perte de précision observée sur ce modèle
+    3 classes (P/R inchangés sur le dataset de validation)."""
+    global _last_predict_speed_ms
     model = _get_model()
     device = _select_device()
-    results = model.predict(frame, conf=conf, device=device, verbose=False)
+    results = model.predict(frame, conf=conf, device=device, half=(device != "cpu"), verbose=False)
+    _last_predict_speed_ms = dict(results[0].speed) if results else {}
 
     found: dict[str, float] = {}
     for result in results:
@@ -90,3 +109,42 @@ def detect(frame: np.ndarray, conf: float = 0.4) -> dict[str, float]:
             if confidence > found.get(class_name, 0.0):
                 found[class_name] = confidence
     return found
+
+
+def get_last_predict_speed_ms() -> dict[str, float]:
+    """Décomposition ultralytics (preprocess/inference/postprocess, en ms)
+    du DERNIER appel à detect() -- lue par le diagnostic multi-étapes
+    (cf. state_update.py) juste après un appel lent, pour savoir combien de
+    temps ultralytics dit lui-même avoir passé dans chaque étape. Si la
+    somme de ces 3 valeurs est BIEN INFÉRIEURE à la durée totale mesurée en
+    wall-clock autour de detect(), le temps manquant est passé AILLEURS
+    (scheduling GIL/OS, attente GPU non comptabilisée par ultralytics) --
+    signal précieux pour distinguer "le calcul est lent" de "quelque chose
+    d'externe a bloqué avant même que le calcul commence"."""
+    return dict(_last_predict_speed_ms)
+
+
+def detect_with_boxes(frame: np.ndarray, conf: float = 0.4) -> list[tuple[str, float, tuple[float, float, float, float]]]:
+    """Comme detect(), mais retourne aussi la position de chaque boîte
+    (cx, cy, w, h normalisés 0-1, format YOLO) -- detect() les jette
+    volontairement (le pipeline live n'a besoin que d'un booléen/confiance
+    par classe). AJOUTÉ (2026-07-13) pour auto-labelliser un nouveau dataset
+    avec le modèle déjà entraîné plutôt qu'avec les anciens templates PNG
+    (cv2.matchTemplate n'est pas scale-invariant -- inutilisable après un
+    changement d'échelle de l'UI, cf. build_yolo_dataset.py --yolo-labels).
+    Retourne une liste (pas un dict) : contrairement à detect(), on veut ICI
+    toutes les boîtes, pas juste la meilleure par classe -- l'appelant filtre
+    lui-même si besoin."""
+    model = _get_model()
+    device = _select_device()
+    results = model.predict(frame, conf=conf, device=device, verbose=False)
+
+    boxes_out: list[tuple[str, float, tuple[float, float, float, float]]] = []
+    for result in results:
+        names = result.names
+        for box in result.boxes:
+            class_name = names[int(box.cls[0])]
+            confidence = float(box.conf[0])
+            cx, cy, w, h = (float(v) for v in box.xywhn[0])
+            boxes_out.append((class_name, confidence, (cx, cy, w, h)))
+    return boxes_out

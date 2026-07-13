@@ -15,10 +15,10 @@ from dataclasses import dataclass
 
 from wardenbot.bar_reader import read_fill_pct
 from wardenbot.capture import ScreenCapture
-from wardenbot.diagnostics import CAPTURE_WATCHDOG_THRESHOLD_S, log_error, log_slow_call
+from wardenbot.diagnostics import CAPTURE_WATCHDOG_THRESHOLD_S, log_error, log_pipeline_diagnostic, log_slow_call
 from wardenbot.engine import State
 from wardenbot.matcher import TemplateMatcher
-from wardenbot.yolo_detect import detect
+from wardenbot.yolo_detect import detect, get_last_predict_speed_ms
 
 
 def make_meiko_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher, regions: dict):
@@ -122,6 +122,32 @@ RAGE_BAR_FILL_BGR = (7, 0, 128)   # BGR, rouge
 # désynchronisation déjà vu avec warden_stacks (cf. hooks.py).
 TARIQ_DETECTION_WORKER_HZ = 15.0   # cf. suggestion "8-15Hz" -- capture+matching tient largement dans ce budget (~15ms sur ~67ms)
 
+# VOILE GCD (2026-07-14, cf. discussion "voile noir décroissant qui
+# correspond au GCD du sort") -- chaque icône de la barre s'assombrit puis se
+# réclaire progressivement, validé par extraction directe sur toute une
+# session filmée (771s) : heavy_strike/wild_swing/face_breaker/skull_crusher/
+# hammer_storm/chain_lightning partagent EXACTEMENT le même pattern (écarts
+# médians ~1.05-1.15s, séquences par moments identiques entre icônes
+# différentes malgré des cooldowns réels très différents) -- ce n'est PAS le
+# cooldown individuel de chaque sort, c'est le GCD PARTAGÉ (ressource unique).
+# culling_strike/thunder_call/focused_wrath (off_gcd, ne consomment pas le
+# GCD partagé) montrent un pattern bien plus espacé et cohérent avec LEUR
+# PROPRE cooldown (4.44s/43s/86s) -- suivis séparément, un par ability.
+#
+# Ce signal est un accusé de réception visuel du JEU, indépendant de YOLO/
+# InputWorker -- utilisé par hooks.py pour confirmer qu'une presse a
+# réellement été traitée par le jeu (cf. PRESS_CONFIRM_WINDOW_S), pas
+# seulement envoyée par notre input.
+GCD_ICON_REGIONS = ("heavy_strike", "wild_swing", "face_breaker", "skull_crusher", "hammer_storm", "chain_lightning")
+OFF_GCD_ICON_REGIONS = ("culling_strike", "thunder_call", "focused_wrath")
+ALL_ICON_REGIONS = GCD_ICON_REGIONS + OFF_GCD_ICON_REGIONS
+
+# Validés sur toute la vidéo (cf. discussion) : plateau "prêt" ~90-160 selon
+# l'artwork de l'icône, voile ~25-55 -- une marge de 50% du plateau roulant
+# récent sépare proprement les deux sans réglage par icône.
+ICON_VEIL_ROLLING_WINDOW_S = 3.0
+ICON_VEIL_REL_THRESHOLD = 0.5
+
 
 @dataclass
 class TariqDetectionSnapshot:
@@ -133,6 +159,10 @@ class TariqDetectionSnapshot:
     skull_crusher_empowered: bool = False
     focused_wrath_empowered: bool = False
     fury: float = 0.0
+    gcd_veil_active: bool = False           # OR sur les 6 icônes GCD_ICON_REGIONS -- voile PARTAGÉ
+    veil_culling_strike: bool = False        # off_gcd -- voile propre à SON cooldown (4.44s)
+    veil_thunder_call: bool = False          # off_gcd -- voile propre à SON cooldown (43s)
+    veil_focused_wrath: bool = False         # off_gcd -- voile propre à SON cooldown (86s)
 
 
 def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher, regions: dict):
@@ -209,6 +239,13 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
     _capture_names = [
         "chain_lightning", "culling_strike", "hammer_storm_cast_bar",
         "tariq_buff_bar", "rage_bar", "hammer_storm_stack_badge",
+        # Icônes de la barre d'abilities (2026-07-14, voile GCD) -- chain_lightning
+        # et culling_strike sont déjà dans cette liste (utilisées pour le match
+        # "grisé"), les 7 autres s'ajoutent à la boîte englobante ici plutôt que
+        # de déclencher des grab() séparés (cf. le bug "5-6 grab() par tick"
+        # déjà corrigé plus haut dans ce fichier).
+        "heavy_strike", "wild_swing", "face_breaker", "skull_crusher",
+        "hammer_storm", "thunder_call", "focused_wrath",
     ]
     _present_regions = [regions[n] for n in _capture_names if regions.get(n) is not None]
     if _present_regions:
@@ -228,6 +265,24 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
         y = region["top"] - _bounds["top"]
         return base_frame[y : y + region["height"], x : x + region["width"]]
 
+    # Historique glissant de luminosité par icône (voile GCD, cf. constantes
+    # ci-dessus) -- vit dans la closure, jamais dans state (state ne stocke
+    # que le résultat booléen final, pas le détail interne de la détection).
+    _icon_brightness_history: dict[str, list[tuple[float, float]]] = {name: [] for name in ALL_ICON_REGIONS}
+
+    def _read_icon_veiled(base_frame, region_name: str, now: float) -> bool:
+        region = regions.get(region_name)
+        if region is None:
+            return False
+        frame = _crop(base_frame, region)
+        brightness = float(frame.mean())
+        history = _icon_brightness_history[region_name]
+        history.append((now, brightness))
+        while history and now - history[0][0] > ICON_VEIL_ROLLING_WINDOW_S:
+            history.pop(0)
+        rolling_max = max(b for _, b in history)
+        return brightness < ICON_VEIL_REL_THRESHOLD * rolling_max if rolling_max > 0 else False
+
     snapshot_box = {"latest": TariqDetectionSnapshot()}
 
     def _detection_cycle() -> None:
@@ -235,32 +290,51 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
         thread détection (cf. _run_detection_worker), jamais dans le thread
         principal. Construit une snapshot FRAÎCHE puis la publie d'un coup
         (affectation unique, atomique) -- ne jamais muter snapshot_box["latest"]
-        en place."""
+        en place.
+
+        Instrumenté étape par étape (2026-07-13, "transforme le watchdog en
+        outil de diagnostic") : chaque étape (grab, chaque match template,
+        chaque lecture de barre, et la décomposition interne d'ultralytics
+        preprocess/inference/postprocess pour l'appel YOLO) est chronométrée
+        et accumulée dans `stages` -- si le cycle entier dépasse le seuil, on
+        journalise TOUT ce détail d'un coup (cf.
+        diagnostics.py::log_pipeline_diagnostic) plutôt qu'une seule durée
+        opaque. cpu_time (time.process_time(), pas time.monotonic()) permet
+        de voir si le thread calculait vraiment ou attendait juste."""
         if _bounds is None:
             return
+        _cycle_t0 = time.monotonic()
+        _cpu_t0 = time.process_time()
+        stages: dict[str, float] = {}
+
         _t0 = time.monotonic()
         base_frame = capturer.grab(_bounds)
         _capture_dur = time.monotonic() - _t0
-        if _capture_dur > CAPTURE_WATCHDOG_THRESHOLD_S:
-            log_slow_call("capturer.grab (boîte englobante tariq)", _capture_dur)
+        stages["grab_ms"] = _capture_dur * 1000
         snap = TariqDetectionSnapshot()
 
         chain_lightning_region = regions.get("chain_lightning")
         if chain_lightning_region is not None:
+            _t0 = time.monotonic()
             frame = _crop(base_frame, chain_lightning_region)
             snap.chain_lightning_dim = matcher.is_match(frame, "chain_lightning")
+            stages["chain_lightning_match_ms"] = (time.monotonic() - _t0) * 1000
 
         culling_strike_region = regions.get("culling_strike")
         if culling_strike_region is not None:
+            _t0 = time.monotonic()
             frame = _crop(base_frame, culling_strike_region)
             snap.culling_strike_dim = matcher.is_match(frame, "culling_strike")
+            stages["culling_strike_match_ms"] = (time.monotonic() - _t0) * 1000
 
         cast_bar_region = regions.get("hammer_storm_cast_bar")
         if cast_bar_region is not None:
+            _t0 = time.monotonic()
             frame = _crop(base_frame, cast_bar_region)
             pct = read_fill_pct(frame, HAMMER_STORM_CAST_BAR_FILL_BGR, tolerance=60, direction="ltr")
             snap.hammer_storm_cast_pct = pct
             snap.hammer_storm_casting = pct > HAMMER_STORM_CASTING_THRESHOLD
+            stages["cast_bar_read_ms"] = (time.monotonic() - _t0) * 1000
 
         buff_bar_region = regions.get("tariq_buff_bar")
         if buff_bar_region is not None:
@@ -272,7 +346,7 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
             # construisant le dataset (build_yolo_dataset.py) : l'icône
             # Hammer Storm seule matchait AUSSI skull_crusher_buff à ~0.64,
             # au-dessus de son propre seuil de prod (0.60). Le modèle entraîné
-            # (runs/detect/train-2/weights/best.pt) sépare correctement les 3
+            # (runs/detect/train-4/weights/best.pt) sépare correctement les 3
             # classes, y compris les 3 buffs actifs simultanément (validé sur
             # une capture live à 0.94-0.98 de confiance, cf. yolo_check.py).
             #
@@ -289,8 +363,22 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
                 _t0 = time.monotonic()
                 last_yolo_detect["found"] = detect(frame)
                 _yolo_dur = time.monotonic() - _t0
-                if _yolo_dur > CAPTURE_WATCHDOG_THRESHOLD_S:
-                    log_slow_call("yolo_detect.detect()", _yolo_dur)
+                stages["yolo_wrapper_total_ms"] = _yolo_dur * 1000
+                # Décomposition GRATUITE fournie par ultralytics lui-même
+                # (results[0].speed) -- preprocess (letterbox/normalize),
+                # inference (forward pass), postprocess (NMS + construction
+                # des résultats -- ultralytics ne sépare pas la NMS du reste
+                # du postprocess). Comparé à yolo_wrapper_total_ms : si la
+                # somme de ces 3 est BIEN inférieure au total mesuré ici, le
+                # temps perdu est HORS d'ultralytics (attente GPU/driver que
+                # même ultralytics ne voit pas).
+                for stage_name, stage_ms in get_last_predict_speed_ms().items():
+                    stages[f"yolo_{stage_name}_ms"] = stage_ms
+                # Plus de log_slow_call individuel ici -- yolo_wrapper_total_ms
+                # est déjà dans `stages`, donc un YOLO lent apparaît de toute
+                # façon dans le diagnostic consolidé du cycle entier
+                # (log_pipeline_diagnostic, en bas de _detection_cycle()) --
+                # un check séparé ici ferait double emploi.
             found = last_yolo_detect["found"]
             snap.hammer_storm_empowered = "hammer_storm_buff" in found
             snap.skull_crusher_empowered = "skull_crusher_buff" in found
@@ -298,12 +386,32 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
 
         rage_bar_region = regions.get("rage_bar")
         if rage_bar_region is not None:
+            _t0 = time.monotonic()
             frame = _crop(base_frame, rage_bar_region)
             snap.fury = read_fill_pct(
                 frame, RAGE_BAR_FILL_BGR, tolerance=50, direction="ltr", max_gap=6
             )
+            stages["rage_bar_read_ms"] = (time.monotonic() - _t0) * 1000
+
+        _t0 = time.monotonic()
+        _icon_now = time.monotonic()
+        snap.gcd_veil_active = any(_read_icon_veiled(base_frame, name, _icon_now) for name in GCD_ICON_REGIONS)
+        snap.veil_culling_strike = _read_icon_veiled(base_frame, "culling_strike", _icon_now)
+        snap.veil_thunder_call = _read_icon_veiled(base_frame, "thunder_call", _icon_now)
+        snap.veil_focused_wrath = _read_icon_veiled(base_frame, "focused_wrath", _icon_now)
+        stages["icon_veil_read_ms"] = (time.monotonic() - _t0) * 1000
 
         snapshot_box["latest"] = snap   # publication atomique -- jamais de mutation en place
+
+        _cycle_dur = time.monotonic() - _cycle_t0
+        if _cycle_dur > CAPTURE_WATCHDOG_THRESHOLD_S:
+            _cpu_dur = time.process_time() - _cpu_t0
+            log_pipeline_diagnostic(
+                "_detection_cycle() (cycle complet)",
+                total_duration_s=_cycle_dur,
+                stages=stages,
+                cpu_time_s=_cpu_dur,
+            )
 
     def _run_detection_worker(stop_event: threading.Event) -> None:
         period = 1.0 / TARIQ_DETECTION_WORKER_HZ
@@ -349,15 +457,11 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
                 _detection_cycle()
             except Exception as exc:
                 log_error("tariq _detection_cycle()", exc)
+            # Le diagnostic détaillé "cycle complet" (étapes + CPU time + GPU)
+            # est désormais journalisé DEPUIS _detection_cycle() elle-même
+            # (cf. log_pipeline_diagnostic ci-dessus) -- un 2e check ici
+            # ferait doublon sur le même évènement, en moins détaillé.
             elapsed = time.monotonic() - start
-            # Filet de sécurité en plus des mesures ciblées (capture/YOLO/OCR)
-            # ci-dessus -- si un cycle complet est anormalement long sans
-            # qu'aucune des mesures individuelles ne l'explique (ex: un
-            # matcher.is_match ou une opération numpy qui bloque, pas
-            # instrumentés séparément), au moins la durée totale est
-            # journalisée pour ne pas repartir de zéro la prochaine fois.
-            if elapsed > CAPTURE_WATCHDOG_THRESHOLD_S:
-                log_slow_call("_detection_cycle() (cycle complet)", elapsed)
             stop_event.wait(max(0.0, period - elapsed))
 
     stop_event = threading.Event()
@@ -383,5 +487,9 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
         state.buffs["skull_crusher_empowered"] = snap.skull_crusher_empowered
         state.buffs["focused_wrath_empowered"] = snap.focused_wrath_empowered
         state.resources["fury"] = snap.fury
+        state.buffs["gcd_veil_active"] = snap.gcd_veil_active
+        state.buffs["veil_culling_strike"] = snap.veil_culling_strike
+        state.buffs["veil_thunder_call"] = snap.veil_thunder_call
+        state.buffs["veil_focused_wrath"] = snap.veil_focused_wrath
 
     return state_update_fn

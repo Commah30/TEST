@@ -9,13 +9,17 @@ Aucune dépendance externe (seul PyYAML est requis, via wardenbot.engine).
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import numpy as np
 
 from wardenbot.bar_reader import read_fill_pct
 from wardenbot.engine import Ability, RotationEngine, State, evaluate_condition, load_abilities
 from wardenbot.hooks import (
+    BURST_PREP_WINDOW_S,
+    BURST_TIMEOUT_MARGIN_S,
     HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED,
+    PRESS_CONFIRM_WINDOW_S,
     SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED,
     tariq_pre_tick,
     tariq_post_tick,
@@ -335,14 +339,15 @@ def test_focused_wrath_discount_fires_hammer_storm_below_normal_threshold():
     fellowship.wiki.fextralife.com/Focused+Wrath : Focused Wrath réduit de
     50% le coût en Fury des 2 prochains Hammer Storm/Skull Crusher -- le buff
     peut venir de Leap Smash (castée manuellement par l'utilisateur), pas seulement
-    d'un cast du bot. Fury à 30% (sous le seuil plein 50, au-dessus du seuil
-    réduit 25) + focused_wrath_empowered actif -> doit quand même partir,
-    sinon le bot croit ne pas avoir assez de Fury pour un proc qu'il peut
-    réellement se permettre."""
+    d'un cast du bot. Fury à 35% (sous le seuil plein 55, au-dessus du seuil
+    réduit 30 -- cf. commentaire HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED,
+    hooks.py, marge ajoutée le 2026-07-13) + focused_wrath_empowered actif ->
+    doit quand même partir, sinon le bot croit ne pas avoir assez de Fury
+    pour un proc qu'il peut réellement se permettre."""
     state = State()
     state.buffs["focused_wrath_empowered"] = True
     state.flags["hammer_storm_proc_ready"] = True
-    state.resources["fury"] = 0.30
+    state.resources["fury"] = 0.35
     assert state.resources["fury"] * 100 > HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED
     pressed = tariq_pre_tick(state)
     assert pressed == "hammer_storm_proc", f"attendu hammer_storm_proc au seuil réduit, reçu {pressed!r}"
@@ -377,7 +382,7 @@ def test_focused_wrath_discount_fires_skull_crusher_below_normal_threshold():
 
 def test_no_discount_without_focused_wrath_active():
     """Sans focused_wrath_empowered, le seuil réduit ne doit JAMAIS
-    s'appliquer -- le hook ne force rien, le scan normal (fury_above:50
+    s'appliquer -- le hook ne force rien, le scan normal (fury_above:55
     plein, config/tariq.yaml) reste seul juge."""
     state = State()
     state.flags["hammer_storm_proc_ready"] = True
@@ -485,6 +490,253 @@ def test_heavy_strike_outranks_skull_crusher_proc_in_priority():
     print("heavy_strike a bien une priority_st strictement inférieure (= prioritaire) à skull_crusher_proc.")
 
 
+def test_planner_stays_normal_when_no_burst_window_imminent():
+    """Ni proche l'un de l'autre (>BURST_PREP_WINDOW_S), ni déjà simultanés :
+    le Planner ne doit jamais entrer en prepare_burst sans raison -- pas de
+    régression sur le comportement normal (aucune attente artificielle)."""
+    state = State()
+    now = time.monotonic()
+
+    # Les deux loin d'être prêts.
+    state.cooldown_until["focused_wrath"] = now + 50.0
+    state.cooldown_until["thunder_call"] = now + 50.0
+    tariq_pre_tick(state)
+    assert state.flags["tariq_objective"] == "normal"
+    assert state.flags["burst_hold"] is False
+
+    # Les deux DÉJÀ prêts en même temps -- pas besoin d'attendre, le scan
+    # normal les prend l'un après l'autre sans intervention du planner.
+    state.cooldown_until.pop("focused_wrath", None)
+    state.cooldown_until.pop("thunder_call", None)
+    tariq_pre_tick(state)
+    assert state.flags["tariq_objective"] == "normal"
+    assert state.flags["burst_hold"] is False
+    print("Planner : reste 'normal' hors fenêtre d'anticipation et quand les deux sont déjà simultanés.")
+
+
+def test_planner_holds_the_ready_cooldown_until_the_other_catches_up():
+    """Coeur du Planner (cf. hooks.py, _update_tariq_planner) : thunder_call
+    prêt maintenant, focused_wrath prêt dans 5s (< BURST_PREP_WINDOW_S) ->
+    entre en prepare_burst et RETIENT thunder_call (burst_hold) via la
+    condition YAML réelle (not flag:burst_hold), au lieu de le tirer seul --
+    preuve concrète que ça corrige l'écart de 22-27s mesuré dans debug.log."""
+    from wardenbot.engine import load_abilities, evaluate_condition
+
+    state = State()
+    now = time.monotonic()
+    state.cooldown_until["focused_wrath"] = now + 5.0   # pas encore prêt, mais bientôt
+
+    tariq_pre_tick(state)
+    assert state.flags["tariq_objective"] == "prepare_burst"
+    assert state.flags["burst_hold"] is True
+
+    abilities, _ = load_abilities("config/tariq.yaml")
+    by_name = {a.name: a for a in abilities}
+    assert evaluate_condition(by_name["thunder_call"].condition_for("st"), state) is False, (
+        "thunder_call doit être retenu par burst_hold en attendant focused_wrath"
+    )
+    print("Planner : thunder_call bien retenu (burst_hold) le temps que focused_wrath rattrape.")
+
+
+def test_planner_releases_hold_once_both_are_ready():
+    """Une fois que le second cooldown rattrape le premier, le burst doit se
+    déclencher -- retour à 'normal' et burst_hold levé, le scan normal presse
+    les deux (focused_wrath puis thunder_call, à un tick d'écart tout au
+    plus, cf. tie-break par ordre de déclaration dans le YAML)."""
+    state = State()
+    now = time.monotonic()
+    state.cooldown_until["focused_wrath"] = now + 5.0
+    tariq_pre_tick(state)
+    assert state.flags["tariq_objective"] == "prepare_burst"
+
+    # Les 5s se sont "écoulées" -- focused_wrath est maintenant prêt aussi.
+    state.cooldown_until["focused_wrath"] = time.monotonic() - 0.01
+    tariq_pre_tick(state)
+    assert state.flags["tariq_objective"] == "normal"
+    assert state.flags["burst_hold"] is False
+    print("Planner : libère la retenue dès que les deux cooldowns sont prêts (burst déclenché).")
+
+
+def test_planner_timeout_prevents_indefinite_hold():
+    """Sécurité anti-blocage : si l'attente dépasse largement la fenêtre
+    prévue (ex: Hammer Storm hard_lock a retardé toute la rotation pendant
+    l'attente), le planner doit abandonner plutôt que de rester bloqué
+    indéfiniment en prepare_burst."""
+    state = State()
+    now = time.monotonic()
+    state.cooldown_until["focused_wrath"] = now + 5.0
+    tariq_pre_tick(state)
+    assert state.flags["tariq_objective"] == "prepare_burst"
+
+    # focused_wrath n'est TOUJOURS pas prêt (reste à now+5.0, dans le futur),
+    # mais l'objectif a été pris il y a bien plus longtemps que la fenêtre +
+    # sa marge -- le timeout doit forcer le retour à 'normal'.
+    state.flags["tariq_objective_since"] = time.monotonic() - (BURST_PREP_WINDOW_S + BURST_TIMEOUT_MARGIN_S + 0.1)
+    tariq_pre_tick(state)
+    assert state.flags["tariq_objective"] == "normal"
+    assert state.flags["burst_hold"] is False
+    print("Planner : le timeout de sécurité débloque l'attente si ça dérive trop.")
+
+
+def test_fury_conserve_blocks_only_discretionary_skull_crusher_filler():
+    """fury_conserve (posé par le planner pendant prepare_burst) ne doit
+    retenir QUE skull_crusher (dump discrétionnaire) -- jamais les procs
+    (règle historique "aucun proc ne doit rater") ni les générateurs
+    (face_breaker/chain_lightning/wild_swing), qui doivent au contraire
+    continuer à builder de la Fury pendant l'attente d'un burst -- sinon le
+    burst démarrerait avec MOINS de Fury que possible, l'inverse du but."""
+    from wardenbot.engine import load_abilities, evaluate_condition
+
+    abilities, _ = load_abilities("config/tariq.yaml")
+    by_name = {a.name: a for a in abilities}
+
+    state = State(mode="st")
+    state.resources["fury"] = 1.0
+    state.flags["fury_conserve"] = True
+    assert evaluate_condition(by_name["skull_crusher"].condition_for("st"), state) is False, (
+        "skull_crusher (dump discrétionnaire) doit être retenu pendant fury_conserve"
+    )
+
+    state.flags["skull_crusher_proc_ready"] = True
+    state.flags["hammer_storm_proc_ready"] = True
+    assert evaluate_condition(by_name["skull_crusher_proc"].condition_for("st"), state) is True
+    assert evaluate_condition(by_name["hammer_storm_proc"].condition_for("st"), state) is True
+
+    state.resources["fury"] = 0.5   # sous les seuils not fury_above des générateurs -- isole fury_conserve de leur propre garde anti-overcap
+    assert evaluate_condition(by_name["face_breaker"].condition_for("st"), state) is True
+    assert evaluate_condition(by_name["chain_lightning"].condition_for("st"), state) is True
+    assert evaluate_condition(by_name["wild_swing"].condition_for("st"), state) is True
+    print("fury_conserve retient bien skull_crusher (filler) sans toucher aux procs/générateurs.")
+
+
+def test_gcd_veil_confirms_a_tracked_press_as_success():
+    """Le voile GCD partagé (state.buffs['gcd_veil_active']) doit confirmer
+    une presse GCD (ex: heavy_strike) comme SUCCESS dès qu'il apparaît dans
+    la fenêtre de confirmation -- cf. hooks.py, PRESS_CONFIRM_WINDOW_S
+    (2026-07-14, suite au signalement de l'utilisateur sur les presses fantômes
+    visibles en jeu mais invisibles dans les logs pour TOUTE ability autre
+    que hammer_storm_proc)."""
+    import wardenbot.diagnostics as diagnostics
+    test_log = Path("test_press_confirm_scratch.log")
+    if test_log.exists():
+        test_log.unlink()
+    original_path = diagnostics.PRESS_CONFIRM_LOG_PATH
+    diagnostics.PRESS_CONFIRM_LOG_PATH = test_log
+    try:
+        state = State()
+        tariq_post_tick(state, "heavy_strike")
+        assert state.flags["_press_confirmations_pending"], "une confirmation doit être enregistrée pour une ability GCD trackée"
+
+        state.buffs["gcd_veil_active"] = True
+        tariq_pre_tick(state)
+
+        content = test_log.read_text()
+        assert "heavy_strike" in content and "SUCCESS" in content
+        assert not state.flags["_press_confirmations_pending"], "la confirmation résolue doit être retirée de la liste d'attente"
+    finally:
+        diagnostics.PRESS_CONFIRM_LOG_PATH = original_path
+        if test_log.exists():
+            test_log.unlink()
+    print("Voile GCD partagé : confirme bien une presse GCD comme SUCCESS.")
+
+
+def test_gcd_veil_timeout_flags_press_as_phantom():
+    """Si le voile GCD n'apparaît jamais dans la fenêtre de confirmation, la
+    presse doit être journalisée PHANTOM_PRESS -- exactement le signal que
+    l'utilisateur voit visuellement en jeu (icône qui flashe sans effet) mais qu'on
+    ne pouvait pas prouver dans le code jusqu'ici pour la plupart des
+    abilities."""
+    import wardenbot.diagnostics as diagnostics
+    test_log = Path("test_press_confirm_scratch.log")
+    if test_log.exists():
+        test_log.unlink()
+    original_path = diagnostics.PRESS_CONFIRM_LOG_PATH
+    diagnostics.PRESS_CONFIRM_LOG_PATH = test_log
+    try:
+        state = State()
+        tariq_post_tick(state, "wild_swing")
+        # simule l'écoulement de la fenêtre de confirmation SANS jamais voir le voile.
+        state.flags["_press_confirmations_pending"][0]["requested_at_monotonic"] -= (PRESS_CONFIRM_WINDOW_S + 0.1)
+        state.buffs["gcd_veil_active"] = False
+        tariq_pre_tick(state)
+
+        content = test_log.read_text()
+        assert "wild_swing" in content and "PHANTOM_PRESS" in content
+        assert not state.flags["_press_confirmations_pending"]
+    finally:
+        diagnostics.PRESS_CONFIRM_LOG_PATH = original_path
+        if test_log.exists():
+            test_log.unlink()
+    print("Fenêtre de confirmation expirée sans voile -> PHANTOM_PRESS journalisé.")
+
+
+def test_off_gcd_veil_is_independent_from_shared_gcd_veil():
+    """culling_strike (off_gcd) doit être confirmée par SON PROPRE voile
+    (veil_culling_strike, suit SON cooldown de 4.44s) -- pas par le voile GCD
+    partagé, qu'elle ne consomme pas. Une presse culling_strike doit pouvoir
+    se confirmer via veil_culling_strike seul, même si gcd_veil_active reste
+    False pendant ce temps."""
+    import wardenbot.diagnostics as diagnostics
+    test_log = Path("test_press_confirm_scratch.log")
+    if test_log.exists():
+        test_log.unlink()
+    original_path = diagnostics.PRESS_CONFIRM_LOG_PATH
+    diagnostics.PRESS_CONFIRM_LOG_PATH = test_log
+    try:
+        state = State()
+        tariq_post_tick(state, "culling_strike")
+        state.buffs["gcd_veil_active"] = False   # le GCD partagé ne bouge pas -- culling_strike ne le consomme pas
+        state.buffs["veil_culling_strike"] = True
+        tariq_pre_tick(state)
+
+        content = test_log.read_text()
+        assert "culling_strike" in content and "SUCCESS" in content
+    finally:
+        diagnostics.PRESS_CONFIRM_LOG_PATH = original_path
+        if test_log.exists():
+            test_log.unlink()
+    print("culling_strike confirmée via son propre voile, indépendamment du GCD partagé.")
+
+
+def test_press_confirmation_abandoned_not_phantom_after_pause_gap():
+    """BUG TROUVÉ EN JEU (2026-07-14, 1re session avec cette instrumentation) :
+    13/38 PHANTOM_PRESS coïncidaient exactement avec un cycle pause/reprise
+    (touche C) -- tariq_pre_tick ne tourne pas pendant la pause, mais
+    time.monotonic() continue d'avancer, donc au réveil tout ce qui était en
+    attente dépassait déjà la fenêtre de confirmation et se journalisait à
+    tort comme un échec. Un grand écart entre deux appels consécutifs de
+    _resolve_press_confirmations doit ABANDONNER silencieusement les
+    confirmations en attente (ininterprétables), pas les journaliser
+    PHANTOM_PRESS."""
+    import wardenbot.diagnostics as diagnostics
+    test_log = Path("test_press_confirm_scratch.log")
+    if test_log.exists():
+        test_log.unlink()
+    original_path = diagnostics.PRESS_CONFIRM_LOG_PATH
+    diagnostics.PRESS_CONFIRM_LOG_PATH = test_log
+    try:
+        state = State()
+        tariq_post_tick(state, "focused_wrath")
+        tariq_pre_tick(state)   # 1er appel -- initialise _press_confirm_last_tick_at, rien à résoudre encore
+        assert state.flags["_press_confirmations_pending"]
+
+        # Simule une pause de plusieurs secondes (touche C) -- tariq_pre_tick
+        # n'a PAS été appelé pendant ce temps, donc _press_confirm_last_tick_at
+        # reste très en arrière par rapport à un vrai now() après la coupure.
+        state.flags["_press_confirm_last_tick_at"] -= 5.0
+        state.buffs["veil_focused_wrath"] = False
+        tariq_pre_tick(state)
+
+        assert not state.flags["_press_confirmations_pending"], "la confirmation doit être abandonnée, pas laissée en attente"
+        content = test_log.read_text() if test_log.exists() else ""
+        assert "PHANTOM_PRESS" not in content, "un écart type pause ne doit JAMAIS produire un faux PHANTOM_PRESS"
+    finally:
+        diagnostics.PRESS_CONFIRM_LOG_PATH = original_path
+        if test_log.exists():
+            test_log.unlink()
+    print("Écart type pause -> confirmation abandonnée silencieusement, pas de faux PHANTOM_PRESS.")
+
+
 if __name__ == "__main__":
     test_ready_flag_arms_only_on_rising_edge()
     test_stuck_active_reading_does_not_rearm_after_consumption()
@@ -508,4 +760,13 @@ if __name__ == "__main__":
     test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry()
     test_hammer_storm_proc_press_with_real_cast_confirms_consumption()
     test_heavy_strike_outranks_skull_crusher_proc_in_priority()
+    test_planner_stays_normal_when_no_burst_window_imminent()
+    test_planner_holds_the_ready_cooldown_until_the_other_catches_up()
+    test_planner_releases_hold_once_both_are_ready()
+    test_planner_timeout_prevents_indefinite_hold()
+    test_fury_conserve_blocks_only_discretionary_skull_crusher_filler()
+    test_gcd_veil_confirms_a_tracked_press_as_success()
+    test_gcd_veil_timeout_flags_press_as_phantom()
+    test_off_gcd_veil_is_independent_from_shared_gcd_veil()
+    test_press_confirmation_abandoned_not_phantom_after_pause_gap()
     print("\nTous les tests passent.")

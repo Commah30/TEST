@@ -91,7 +91,27 @@ REGIONS = {
         # plus petite que le template). Comme pour buff_bar chez Meiko :
         # zone large + recherche dedans, cette zone se réorganise aussi
         # selon ce qui est actif.
-        "tariq_buff_bar": {'left': 1162, 'top': 1316, 'width': 280, 'height': 60},
+        # RECALIBRÉ (2026-07-14) : l'utilisateur a augmenté la taille des icônes de
+        # buff en jeu (option d'affichage) -- l'icône occupe maintenant
+        # ~130x140px (vs ~50x50px avant) et sa position a bougé. Nouvelles
+        # bornes mesurées par capture directe (3 captures à des instants
+        # différents, un seul buff actif à la fois observé, une fois 2
+        # icônes partiellement visibles côte à côte) -- PAS calibré aussi
+        # rigoureusement que l'ancienne région (pas de session capture_helper
+        # mark dédiée, juste des screenshots ponctuels) : marge large
+        # volontaire pour absorber l'imprécision + une éventuelle 3e icône
+        # simultanée jamais observée en capture. À VALIDER avec
+        # detect_check.py / yolo_check.py en jeu, resserrer si besoin.
+        #
+        # CORRIGÉ (2026-07-13) : top+height dépassait 1440 (résolution de la
+        # vidéo Game Bar utilisée pour le dataset) -- mss en live ne s'en
+        # plaignait pas (il capture au-delà sans erreur), mais un slice numpy
+        # sur une frame vidéo décodée tronque silencieusement, ce qui faisait
+        # échouer TOUTE la boucle d'auto-labelling (crop.shape jamais égal à
+        # la hauteur attendue -- build_yolo_dataset.py ajoutait 0 image).
+        # height réduite pour rester dans les bornes, vérifié sur un vrai
+        # clip que l'icône reste bien contenue avec marge.
+        "tariq_buff_bar": {'left': 970, 'top': 1280, 'width': 350, 'height': 150},
 
         # PLUS UTILISÉE (2026-07-12) : badge de stack de l'icône
         # hammer_storm_buff, DANS tariq_buff_bar. Le comptage de stacks a été

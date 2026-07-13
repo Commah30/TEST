@@ -1,26 +1,38 @@
 """
 build_yolo_dataset.py — construit un dataset YOLO (format détection) à partir
-d'un clip vidéo, en s'auto-labellisant via le template matching EXISTANT
-(matcher.py) sur tariq_buff_bar -- pilote choisi car c'est la détection la
-plus fragile identifiée cette session ("mitigée mais pas root-causée", cf.
-CLAUDE.md/discussion). Zéro annotation manuelle de bounding box nécessaire :
-cv2.matchTemplate donne déjà confiance + position (minMaxLoc) pour les 3
-templates hammer_storm_buff/skull_crusher_buff/focused_wrath_buff -- au-dessus
-du seuil connu-bon (TARIQ_BUFF_BAR_THRESHOLDS, main.py), on écrit directement
-une bounding box YOLO à cet endroit. Sous le seuil pour les 3 -> image "vide"
-(label vide), utile comme exemple négatif.
+d'un clip vidéo, en s'auto-labellisant SOIT via le template matching EXISTANT
+(matcher.py) sur tariq_buff_bar, SOIT via le modèle YOLO déjà entraîné
+(--yolo-labels) -- pilote choisi car c'est la détection la plus fragile
+identifiée cette session ("mitigée mais pas root-causée", cf.
+CLAUDE.md/discussion). Zéro annotation manuelle de bounding box nécessaire
+dans les deux cas.
 
-Ce n'est PAS une vérité terrain parfaite (mêmes faux positifs/négatifs
-qu'aujourd'hui en jeu) mais un point de départ largement plus rapide qu'un
-étiquetage 100% manuel -- objectif : YOLO généralise mieux que le template
-matching pur (bruit, échelle, variations d'éclairage/VFX), donc appris sur
-des labels imparfaits mais tous cohérents avec la logique déjà en prod, il
-peut déjà dépasser le template matching en robustesse. l'utilisateur garde la main
-pour supprimer les paires image+label visiblement fausses avant training
-(cf. dossier preview/, section USAGE).
+Mode template (par défaut) : cv2.matchTemplate donne confiance + position
+(minMaxLoc) pour les 3 templates hammer_storm_buff/skull_crusher_buff/
+focused_wrath_buff -- au-dessus du seuil connu-bon (TARIQ_BUFF_BAR_THRESHOLDS,
+main.py), on écrit directement une bounding box YOLO à cet endroit.
+
+Mode YOLO (--yolo-labels, AJOUTÉ 2026-07-13) : cv2.matchTemplate n'est PAS
+scale-invariant -- inutilisable si les icônes ont changé de taille à l'écran
+(ex: option d'affichage "taille des buffs" augmentée en jeu) puisque les
+templates PNG capturés restent à l'ancienne échelle. Le modèle YOLO déjà
+entraîné, lui, généralise raisonnablement à une nouvelle échelle (mesuré :
+0.94-0.96 de confiance sur des captures live à la nouvelle taille) -- on
+s'en sert pour pseudo-labelliser le nouveau clip (semi-supervised
+bootstrapping : le modèle imparfait actuel aide à construire son propre
+jeu d'entraînement amélioré), plutôt que de recapturer des templates à la
+main pour chaque changement d'échelle futur.
+
+Dans les deux modes : sous le seuil pour les 3 classes -> image "vide"
+(label vide), utile comme exemple négatif. Ce n'est PAS une vérité terrain
+parfaite (mêmes faux positifs/négatifs qu'aujourd'hui en jeu) mais un point
+de départ largement plus rapide qu'un étiquetage 100% manuel. l'utilisateur garde
+la main pour supprimer les paires image+label visiblement fausses avant
+training (cf. dossier preview/, section USAGE).
 
 USAGE :
     python build_yolo_dataset.py <video.mp4> [--fps 3] [--out dataset_tariq_buffs]
+    python build_yolo_dataset.py <video.mp4> --yolo-labels [--yolo-conf 0.3]
 
 Étapes :
     1. Lance ce script sur un ou plusieurs clips Game Bar de Tariq couvrant
@@ -57,6 +69,7 @@ except ImportError:
 
 sys.path.insert(0, str(Path(__file__).parent))
 from main import REGIONS, TARIQ_BUFF_BAR_THRESHOLDS  # noqa: E402
+from wardenbot.yolo_detect import detect_with_boxes  # noqa: E402
 
 CLASS_NAMES = list(TARIQ_BUFF_BAR_THRESHOLDS.keys())
 TEMPLATE_DIR = Path("templates/tariq")
@@ -96,15 +109,39 @@ def auto_label(crop: np.ndarray, templates: dict[str, np.ndarray]) -> list[tuple
     return boxes
 
 
+def auto_label_yolo(crop: np.ndarray, conf: float) -> list[tuple[int, float, float, float, float]]:
+    """Équivalent de auto_label() mais via le modèle YOLO déjà entraîné
+    (detect_with_boxes) plutôt que cv2.matchTemplate -- cf. docstring du
+    module. Garde une seule boîte par classe (la plus confiante), même
+    logique que detect() en prod : au-delà de ça, le nettoyage des
+    chevauchements inter-classes (hammer_storm_buff/skull_crusher_buff sur
+    la même icône, bug déjà rencontré) se fait après coup sur le dataset
+    complet, pas ici image par image."""
+    name_to_id = {name: i for i, name in enumerate(CLASS_NAMES)}
+    best: dict[str, tuple[float, tuple[float, float, float, float]]] = {}
+    for class_name, confidence, box in detect_with_boxes(crop, conf=conf):
+        if class_name not in name_to_id:
+            continue
+        if confidence > best.get(class_name, (0.0, None))[0]:
+            best[class_name] = (confidence, box)
+    return [(name_to_id[name], *box) for name, (_, box) in best.items()]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("video")
     parser.add_argument("--fps", type=float, default=3.0)
     parser.add_argument("--out", default="dataset_tariq_buffs")
+    parser.add_argument("--yolo-labels", action="store_true",
+                         help="Auto-labellise avec le modèle YOLO déjà entraîné au lieu du template matching -- "
+                              "nécessaire si l'échelle des icônes à l'écran a changé (cf. docstring du module).")
+    parser.add_argument("--yolo-conf", type=float, default=0.3,
+                         help="Seuil de confiance en mode --yolo-labels (défaut 0.3 -- volontairement permissif, "
+                              "le tri se fait ensuite via preview/, pas ici).")
     args = parser.parse_args()
 
     region = REGIONS["tariq"]["tariq_buff_bar"]
-    templates = load_templates()
+    templates = None if args.yolo_labels else load_templates()
 
     out_dir = Path(args.out)
     for sub in ("images/train", "images/val", "labels/train", "labels/val", "preview"):
@@ -135,7 +172,7 @@ def main() -> None:
             x, y, w, h = region["left"], region["top"], region["width"], region["height"]
             crop = frame[y : y + h, x : x + w]
             if crop.shape[0] == h and crop.shape[1] == w:
-                boxes = auto_label(crop, templates)
+                boxes = auto_label_yolo(crop, args.yolo_conf) if args.yolo_labels else auto_label(crop, templates)
                 if not boxes:
                     empty += 1
                 idx = next_idx + saved

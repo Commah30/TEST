@@ -41,13 +41,23 @@ gcd_ms: 1000
 
 abilities:
   # BUG TROUVÉ EN JEU (2026-07-12), corrigé : cooldown_ms:500 était inventé.
-  # Vraie mécanique confirmée par l'utilisateur : cooldown réel de 4.44s ET
-  # disponible seulement quand la cible passe sous 35% PV (icône grisée
+  # Vraie mécanique confirmée par l'utilisateur à l'époque : cooldown réel de 4.44s
+  # ET disponible seulement quand la cible passe sous 35% PV (icône grisée
   # au-dessus, allumée en dessous). Template culling_strike.png capturé sur
   # l'état GRISÉ (indisponible) -- même schéma que chain_lightning plus bas :
   # skip_detection:true bypass le check normal, et on caste sur L'ABSENCE du
   # grisé (not debuff:culling_strike_dim) plutôt que la présence d'un
   # template allumé qu'on n'a pas. cf. make_tariq_state_update_fn (main.py).
+  #
+  # RÉVISÉ PUIS ANNULÉ (2026-07-13) : le guide (method.gg) mentionne
+  # "Culling Strike : si ≥10 Fury, toute cible" -- mais l'utilisateur a précisé que
+  # cette version (utilisable sur n'importe quelle cible) est liée au
+  # légendaire "Executioner's Unsanitary Bands", QU'IL NE JOUE PAS. Sans ce
+  # légendaire, l'hypothèse d'origine (disponible sous 35% PV cible,
+  # confirmée par l'utilisateur à l'époque) reste la meilleure info qu'on a --
+  # condition restaurée telle quelle, aucun changement net sur cette
+  # ability pour l'instant faute d'une meilleure source pour SON build
+  # précis (sans brassards).
   - name: culling_strike
     priority_st: 0
     priority_cleave: 0
@@ -67,27 +77,53 @@ abilities:
   # utile même sans combo particulier : off_gcd, aucun coût, et le rabais de
   # Fury qu'elle offre (cf. hooks.py, HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED)
   # profite à Hammer Storm/Skull Crusher dès qu'elle est up.
+  # not flag:burst_hold (2026-07-13) : câblage du Planner (cf. hooks.py,
+  # _update_tariq_planner) -- retenue si thunder_call est prêt mais pas
+  # encore elle, pour partir avec lui plutôt que 22-27s avant/après (écarts
+  # réels mesurés dans debug.log avant ce fix).
+  #
+  # skip_detection: true (2026-07-13) : BUG TROUVÉ EN JEU -- c'était la seule
+  # ability du kit (avec thunder_call) sans skip_detection, alors que
+  # heavy_strike/hammer_storm_proc/skull_crusher_proc/culling_strike/
+  # chain_lightning/wild_swing ont TOUTES déjà eu ce même fix (le vrai
+  # cooldown suffit, la détection visuelle de l'icône est peu fiable et
+  # retarde des casts pourtant légitimes). Preuve directe dans debug.log
+  # (session 15:19-15:29) : skip_trace de focused_wrath passe de "condition
+  # fausse" (Planner en train de retenir, normal) à "template ne matche pas"
+  # pendant 22s d'affilée -- le Planner avait pourtant déjà levé burst_hold,
+  # le vrai blocage était la détection template, pas la synchro. Cooldown
+  # (86s) déjà confirmé par l'utilisateur -- garde-fou suffisant à lui seul.
   - name: focused_wrath
     priority_st: 0
     priority_cleave: 0
     priority_aoe: 0
     off_gcd: true
+    skip_detection: true
     cooldown_ms: 86000
     gcd_ms: 1
-    condition: not buff:focused_wrath_empowered
+    condition: not buff:focused_wrath_empowered, not flag:burst_hold
 
   # BUG TROUVÉ EN JEU (2026-07-12) : cooldown_ms:1 était inventé -- vrai
   # cooldown confirmé par l'utilisateur = 43s. En jeu réel avec l'ancienne valeur :
   # 707 presses en ~2 minutes (off_gcd + quasiment aucun frein = spam
   # continu à ~30Hz). Root cause identique à culling_strike ci-dessus :
   # off_gcd bypasse le GCD, donc SEUL cooldown_ms protège contre le spam.
+  # not flag:burst_hold (2026-07-13) : symétrique de focused_wrath ci-dessus
+  # -- retenue si focused_wrath est prêt mais pas encore elle. cf. hooks.py,
+  # _update_tariq_planner, pour la logique complète (fenêtre d'attente +
+  # timeout de sécurité).
+  # skip_detection: true (2026-07-13) : même fix que focused_wrath ci-dessus,
+  # par analogie (même structure, même absence de skip_detection jusqu'ici)
+  # -- cooldown (43s) déjà confirmé par l'utilisateur, suffisant comme garde-fou.
   - name: thunder_call
     priority_st: 0
     priority_cleave: 0
     priority_aoe: 0
     off_gcd: true
+    skip_detection: true
     cooldown_ms: 43000
     gcd_ms: 1
+    condition: not flag:burst_hold
 
   # BUG TROUVÉ EN JEU (2026-07-12), corrigé : "buff:focused_wrath_empowered"
   # rendait Hammer Storm OBLIGATOIREMENT dépendante de la fenêtre Focused
@@ -108,6 +144,19 @@ abilities:
   # cohérent avec des procs valides ratés par un 2e check redondant. La
   # condition (flag:hammer_storm_proc_ready + fury_above:50) est le vrai
   # garde-fou désormais, pas l'icône.
+  # BUG TROUVÉ EN JEU (2026-07-13, rapporté par l'utilisateur : "le bot doit presser
+  # deux fois pour que le sort parte") : analyse de debug.log (session
+  # 01:05-01:18) via le marqueur de confirmation (_hammer_storm_proc_pending,
+  # cf. hooks.py) -- sur 65 tentatives, 56 confirmées au 1er coup, 9 échouent
+  # (le jeu ne caste pas malgré la presse). 6-7 de ces 9 échecs se
+  # regroupent entre 50.4% et 53.2% de Fury LUE -- et à cette MÊME lecture
+  # (51.1%, 53.2%), d'autres presses réussissent ailleurs dans le log :
+  # ce n'est pas un vrai seuil différent à trouver, c'est du bruit de mesure
+  # (latence détection/jeu, tolérance du scan de pixels) autour du seuil de
+  # 50 -- qui collait bord à bord sans marge pour l'absorber. Aucun échec
+  # observé au-dessus de 53.9%. Seuil remonté à 55 -- marge suffisante pour
+  # sortir de la zone de bruit, coût minime (la Fury continue de monter,
+  # retarde le cast d'une fraction de GCD tout au plus dans le pire cas).
   - name: hammer_storm_proc
     priority_st: 2
     priority_cleave: 2
@@ -116,7 +165,7 @@ abilities:
     is_proc: true
     skip_detection: true
     template: hammer_storm   # gardé pour référence -- plus utilisé pour la détection (skip_detection:true), seulement par REGIONS["tariq"]["hammer_storm_stack_badge"]/état-update
-    condition: fury_above:50, flag:hammer_storm_proc_ready
+    condition: fury_above:55, flag:hammer_storm_proc_ready
 
   # BUG TROUVÉ EN JEU (2026-07-12) : priority_st était à égalité avec
   # heavy_strike (3 partout) -- au tie-break par ordre de déclaration
@@ -161,6 +210,24 @@ abilities:
     cooldown_ms: 5920
     skip_detection: true
 
+  # not flag:fury_conserve (2026-07-13) : câblage du Planner (cf. hooks.py) --
+  # c'est un DUMP DISCRÉTIONNAIRE de Fury (pas un proc, pas heavy_strike),
+  # retenu le temps que focused_wrath/thunder_call s'alignent pour un burst,
+  # afin d'arriver à ce moment avec le plus de Fury possible (fenêtre à coût
+  # réduit de 50% sur Hammer Storm/Skull Crusher). Les générateurs
+  # (face_breaker/chain_lightning/wild_swing) et les procs (hammer_storm_proc/
+  # skull_crusher_proc) ne sont volontairement PAS concernés par ce flag --
+  # cf. commentaire complet dans hooks.py.
+  #
+  # fury_above:50 -> 30 (2026-07-13, demandé par l'utilisateur) : skull_crusher_proc
+  # (probablement la même dépense sous-jacente) est documenté à fury_above:23
+  # "coût plein" (cf. hooks.py, SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED)
+  # -- 50 semblait surdimensionné par rapport à cette valeur déjà validée
+  # ailleurs dans ce fichier. 30 choisi comme marge de sécurité au-dessus de
+  # 23 (même esprit que la marge +5 déjà appliquée à hammer_storm_proc,
+  # 50->55) plutôt que de descendre directement à 23 sans preuve que cette
+  # instance-ci partage exactement le même coût. PAS confirmé par des logs à
+  # ce stade -- à valider en jeu comme le seuil de hammer_storm_proc l'a été.
   - name: skull_crusher
     priority_st: 5
     priority_cleave: 4
@@ -168,7 +235,7 @@ abilities:
     skip_detection: true
     cooldown_ms: 1
     gcd_ms: 650
-    condition: fury_above:50, not buff:hammer_storm_empowered
+    condition: fury_above:30, not buff:hammer_storm_empowered, not flag:fury_conserve
 
   # cooldown_ms:1 était un placeholder -- vrai cooldown confirmé par l'utilisateur :
   # 4.44s (même valeur que Culling Strike). Contrairement à culling_strike/
