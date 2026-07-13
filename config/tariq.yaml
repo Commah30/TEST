@@ -2,11 +2,18 @@
 # tariq.yaml — rotation Tariq "Spam V2" (importée depuis Schism V2.yaml,
 # fournie par l'utilisateur). Copie DANS le projet pour que l'exe puisse l'embarquer
 # à côté de config/warden.yaml -- l'original externe n'a pas été touché.
+# EN: tariq.yaml — Tariq "Spam V2" rotation (imported from Schism V2.yaml,
+# EN: provided by the user). Copied INTO the project so the exe can bundle it
+# EN: next to config/warden.yaml -- the external original was not touched.
 #
 # `post_tick_hook: tariq_post_tick` ci-dessous est un champ hérité du YAML
 # d'origine -- il n'est PAS lu automatiquement par engine.py. Le câblage réel
 # de tariq_pre_tick/tariq_post_tick se fait explicitement dans main.py
 # (dict CHARACTERS), exactement comme pour meiko_pre_tick/meiko_post_tick.
+# EN: `post_tick_hook: tariq_post_tick` below is a field inherited from the
+# EN: original YAML -- it is NOT read automatically by engine.py. The real
+# EN: wiring of tariq_pre_tick/tariq_post_tick is done explicitly in main.py
+# EN: (CHARACTERS dict), exactly like for meiko_pre_tick/meiko_post_tick.
 #
 # DEUX CONDITIONS MODIFIÉES PAR RAPPORT À L'ORIGINAL (fix du bug de
 # double-cast documenté dans message.txt -- cf. wardenbot/hooks.py) :
@@ -17,12 +24,25 @@
 #     (même forme que hammer_storm_proc, fix appliqué par analogie -- PAS
 #     encore confirmé par des logs en jeu comme hammer_storm_proc, à
 #     surveiller)
+# EN: TWO CONDITIONS CHANGED FROM THE ORIGINAL (fix for the double-cast bug
+# EN: documented in message.txt -- cf. wardenbot/hooks.py):
+# EN:   - hammer_storm_proc: buff:hammer_storm_empowered -> flag:hammer_storm_proc_ready
+# EN:     (+ "not last:hammer_storm_proc" removed, now useless: the flag is
+# EN:     already a single-use rising edge, cf. tariq_pre_tick/post_tick)
+# EN:   - skull_crusher_proc: buff:skull_crusher_empowered -> flag:skull_crusher_proc_ready
+# EN:     (same shape as hammer_storm_proc, fix applied by analogy -- NOT yet
+# EN:     confirmed by in-game logs like hammer_storm_proc, to watch)
 #
 # Le champ `gcd_ms` par-ability de l'original (culling_strike, thunder_call,
 # focused_wrath, etc.) est conservé tel quel -- accepté par Ability
 # (wardenbot/engine.py) mais PAS ENCORE câblé dans le moteur, sémantique à
 # clarifier avant d'y toucher (cf. discussion sur le bug historique "spam
 # Wind Kick" côté Meiko, CLAUDE.md bug #1).
+# EN: The per-ability `gcd_ms` field from the original (culling_strike,
+# EN: thunder_call, focused_wrath, etc.) is kept as-is -- accepted by Ability
+# EN: (wardenbot/engine.py) but NOT YET wired into the engine, semantics to
+# EN: clarify before touching it (cf. discussion of the historical "spam
+# EN: Wind Kick" bug on the Meiko side, CLAUDE.md bug #1).
 # state.buffs["hammer_storm_empowered"] / ["skull_crusher_empowered"] sont
 # désormais alimentés par make_tariq_state_update_fn (main.py), via les
 # templates templates/tariq/hammer_storm_buff.png / skull_crusher_buff.png
@@ -30,6 +50,13 @@
 # clip Game Bar (marge de confiance large des deux côtés, cf. main.py).
 # Pas encore reconfirmé EN JEU RÉEL (calibré depuis une vidéo) -- à valider
 # avec detect_check.py une fois en jeu avant de faire confiance à 100%.
+# EN: state.buffs["hammer_storm_empowered"] / ["skull_crusher_empowered"] are
+# EN: now fed by make_tariq_state_update_fn (main.py), via the templates
+# EN: templates/tariq/hammer_storm_buff.png / skull_crusher_buff.png on
+# EN: REGIONS["tariq"]["tariq_buff_bar"] -- calibrated and validated on a real
+# EN: Game Bar clip (wide confidence margin on both sides, cf. main.py). Not
+# EN: yet reconfirmed IN A REAL GAME (calibrated from a video) -- to validate
+# EN: with detect_check.py once in-game before trusting it 100%.
 # =============================================================================
 
 class_name: tariq
@@ -48,6 +75,15 @@ abilities:
   # skip_detection:true bypass le check normal, et on caste sur L'ABSENCE du
   # grisé (not debuff:culling_strike_dim) plutôt que la présence d'un
   # template allumé qu'on n'a pas. cf. make_tariq_state_update_fn (main.py).
+  # EN: BUG FOUND IN-GAME (2026-07-12), fixed: cooldown_ms:500 was made up.
+  # EN: Real mechanic confirmed by the user at the time: real 4.44s cooldown AND
+  # EN: available only when the target drops below 35% HP (icon grayed above,
+  # EN: lit below). Template culling_strike.png captured on the GRAYED
+  # EN: (unavailable) state -- same scheme as chain_lightning below:
+  # EN: skip_detection:true bypasses the normal check, and we cast on the
+  # EN: ABSENCE of the gray (not debuff:culling_strike_dim) rather than the
+  # EN: presence of a lit template we don't have. cf. make_tariq_state_update_fn
+  # EN: (main.py).
   #
   # RÉVISÉ PUIS ANNULÉ (2026-07-13) : le guide (method.gg) mentionne
   # "Culling Strike : si ≥10 Fury, toute cible" -- mais l'utilisateur a précisé que
@@ -58,6 +94,14 @@ abilities:
   # condition restaurée telle quelle, aucun changement net sur cette
   # ability pour l'instant faute d'une meilleure source pour SON build
   # précis (sans brassards).
+  # EN: REVISED THEN REVERTED (2026-07-13): the guide (method.gg) mentions
+  # EN: "Culling Strike: if >=10 Fury, any target" -- but the user clarified that
+  # EN: this version (usable on any target) is tied to the legendary
+  # EN: "Executioner's Unsanitary Bands", WHICH HE DOES NOT PLAY. Without that
+  # EN: legendary, the original assumption (available under 35% target HP,
+  # EN: confirmed by the user at the time) stays the best info we have --
+  # EN: condition restored as-is, no net change on this ability for now for
+  # EN: lack of a better source for HIS specific build (no bands).
   - name: culling_strike
     priority_st: 0
     priority_cleave: 0
@@ -77,10 +121,23 @@ abilities:
   # utile même sans combo particulier : off_gcd, aucun coût, et le rabais de
   # Fury qu'elle offre (cf. hooks.py, HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED)
   # profite à Hammer Storm/Skull Crusher dès qu'elle est up.
+  # EN: SIMPLIFIED (2026-07-12), AT THE USER'S REQUEST: no more triggering tied
+  # EN: to Hammer Storm stacks (the game never shows "2" on that badge, cf.
+  # EN: wardenbot/hooks.py -- the whole combo/counting logic was doomed to
+  # EN: fail). Focused Wrath now fires as soon as its cooldown (86s) is over,
+  # EN: like thunder_call -- "not buff:focused_wrath_empowered" just avoids
+  # EN: recasting while the previous buff is still active. Still useful even
+  # EN: without a particular combo: off_gcd, no cost, and the Fury discount it
+  # EN: grants (cf. hooks.py, HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED)
+  # EN: benefits Hammer Storm/Skull Crusher as soon as it is up.
   # not flag:burst_hold (2026-07-13) : câblage du Planner (cf. hooks.py,
   # _update_tariq_planner) -- retenue si thunder_call est prêt mais pas
   # encore elle, pour partir avec lui plutôt que 22-27s avant/après (écarts
   # réels mesurés dans debug.log avant ce fix).
+  # EN: not flag:burst_hold (2026-07-13): Planner wiring (cf. hooks.py,
+  # EN: _update_tariq_planner) -- held back if thunder_call is ready but not
+  # EN: yet this one, to fire together rather than 22-27s apart (real gaps
+  # EN: measured in debug.log before this fix).
   #
   # skip_detection: true (2026-07-13) : BUG TROUVÉ EN JEU -- c'était la seule
   # ability du kit (avec thunder_call) sans skip_detection, alors que
@@ -93,6 +150,17 @@ abilities:
   # pendant 22s d'affilée -- le Planner avait pourtant déjà levé burst_hold,
   # le vrai blocage était la détection template, pas la synchro. Cooldown
   # (86s) déjà confirmé par l'utilisateur -- garde-fou suffisant à lui seul.
+  # EN: skip_detection: true (2026-07-13): BUG FOUND IN-GAME -- it was the only
+  # EN: ability in the kit (with thunder_call) without skip_detection, whereas
+  # EN: heavy_strike/hammer_storm_proc/skull_crusher_proc/culling_strike/
+  # EN: chain_lightning/wild_swing ALL already got this same fix (the real
+  # EN: cooldown is enough, visual icon detection is unreliable and delays
+  # EN: otherwise-legitimate casts). Direct proof in debug.log (session
+  # EN: 15:19-15:29): focused_wrath's skip_trace goes from "condition false"
+  # EN: (Planner holding, normal) to "template does not match" for 22s
+  # EN: straight -- the Planner had already released burst_hold, the real block
+  # EN: was template detection, not the sync. Cooldown (86s) already confirmed
+  # EN: by the user -- a sufficient guardrail on its own.
   - name: focused_wrath
     priority_st: 0
     priority_cleave: 0
@@ -108,13 +176,25 @@ abilities:
   # 707 presses en ~2 minutes (off_gcd + quasiment aucun frein = spam
   # continu à ~30Hz). Root cause identique à culling_strike ci-dessus :
   # off_gcd bypasse le GCD, donc SEUL cooldown_ms protège contre le spam.
+  # EN: BUG FOUND IN-GAME (2026-07-12): cooldown_ms:1 was made up -- real
+  # EN: cooldown confirmed by the user = 43s. In a real game with the old value:
+  # EN: 707 presses in ~2 minutes (off_gcd + almost no brake = continuous spam
+  # EN: at ~30Hz). Same root cause as culling_strike above: off_gcd bypasses
+  # EN: the GCD, so ONLY cooldown_ms protects against spam.
   # not flag:burst_hold (2026-07-13) : symétrique de focused_wrath ci-dessus
   # -- retenue si focused_wrath est prêt mais pas encore elle. cf. hooks.py,
   # _update_tariq_planner, pour la logique complète (fenêtre d'attente +
   # timeout de sécurité).
+  # EN: not flag:burst_hold (2026-07-13): mirror of focused_wrath above --
+  # EN: held back if focused_wrath is ready but not yet this one. cf. hooks.py,
+  # EN: _update_tariq_planner, for the full logic (wait window + safety
+  # EN: timeout).
   # skip_detection: true (2026-07-13) : même fix que focused_wrath ci-dessus,
   # par analogie (même structure, même absence de skip_detection jusqu'ici)
   # -- cooldown (43s) déjà confirmé par l'utilisateur, suffisant comme garde-fou.
+  # EN: skip_detection: true (2026-07-13): same fix as focused_wrath above, by
+  # EN: analogy (same structure, same absence of skip_detection until now) --
+  # EN: cooldown (43s) already confirmed by the user, sufficient as a guardrail.
   - name: thunder_call
     priority_st: 0
     priority_cleave: 0
@@ -136,6 +216,17 @@ abilities:
   # prête + fury suffisante, QUE Focused Wrath soit up ou non. Le combo à 2
   # stacks (via tariq_pre_tick) profite quand même du bonus quand la
   # fenêtre s'aligne -- mais ne bloque plus les cas normaux à 1 stack.
+  # EN: BUG FOUND IN-GAME (2026-07-12), fixed: "buff:focused_wrath_empowered"
+  # EN: made Hammer Storm MANDATORILY dependent on the Focused Wrath window --
+  # EN: but that window only exists during the 2-stack combo (cf.
+  # EN: tariq_pre_tick, hooks.py), not permanently. Result in a real game:
+  # EN: focused_wrath cast 67 times vs only 7 hammer_storm_proc -- the proc
+  # EN: armed far more often than it was consumed, wasting procs of the main
+  # EN: damage source (the "no proc must be missed" rule established earlier).
+  # EN: Condition removed: Hammer Storm fires as soon as ready + enough fury,
+  # EN: WHETHER Focused Wrath is up or not. The 2-stack combo (via
+  # EN: tariq_pre_tick) still benefits from the bonus when the window aligns --
+  # EN: but no longer blocks the normal 1-stack cases.
   # skip_detection ajouté (2026-07-12) : elle dépendait EN PLUS d'un match
   # de template sur l'icône de la barre d'abilities -- redondant et risqué
   # vu qu'on a déjà une détection fiable et dédiée du proc via le buff
@@ -144,6 +235,14 @@ abilities:
   # cohérent avec des procs valides ratés par un 2e check redondant. La
   # condition (flag:hammer_storm_proc_ready + fury_above:50) est le vrai
   # garde-fou désormais, pas l'icône.
+  # EN: skip_detection added (2026-07-12): it ALSO depended on a template match
+  # EN: on the ability-bar icon -- redundant and risky since we already have a
+  # EN: reliable, dedicated proc detection via the buff (rising edge on
+  # EN: hammer_storm_empowered, cf. tariq_pre_tick): only 14 hammer_storm_proc
+  # EN: in a real game for the main damage source, consistent with valid procs
+  # EN: missed by a redundant 2nd check. The condition
+  # EN: (flag:hammer_storm_proc_ready + fury_above:50) is the real guardrail
+  # EN: now, not the icon.
   # BUG TROUVÉ EN JEU (2026-07-13, rapporté par l'utilisateur : "le bot doit presser
   # deux fois pour que le sort parte") : analyse de debug.log (session
   # 01:05-01:18) via le marqueur de confirmation (_hammer_storm_proc_pending,
@@ -157,6 +256,19 @@ abilities:
   # observé au-dessus de 53.9%. Seuil remonté à 55 -- marge suffisante pour
   # sortir de la zone de bruit, coût minime (la Fury continue de monter,
   # retarde le cast d'une fraction de GCD tout au plus dans le pire cas).
+  # EN: BUG FOUND IN-GAME (2026-07-13, reported by the user: "the bot has to
+  # EN: press twice for the spell to fire"): analysis of debug.log (session
+  # EN: 01:05-01:18) via the confirmation marker (_hammer_storm_proc_pending,
+  # EN: cf. hooks.py) -- out of 65 attempts, 56 confirmed on the 1st try, 9
+  # EN: fail (the game doesn't cast despite the press). 6-7 of those 9 failures
+  # EN: cluster between 50.4% and 53.2% of READ Fury -- and at that SAME
+  # EN: reading (51.1%, 53.2%), other presses succeed elsewhere in the log:
+  # EN: it's not a real different threshold to find, it's measurement noise
+  # EN: (detection/game latency, pixel-scan tolerance) around the threshold of
+  # EN: 50 -- which sat edge-to-edge with no margin to absorb it. No failure
+  # EN: observed above 53.9%. Threshold raised to 55 -- enough margin to leave
+  # EN: the noise zone, minimal cost (Fury keeps rising, delays the cast by a
+  # EN: fraction of a GCD at most in the worst case).
   - name: hammer_storm_proc
     # priority_st/cleave/aoe descendus de 2 à 4 (2026-07-15, demandé par
     # l'utilisateur) : même principe déjà appliqué à skull_crusher_proc plus bas
@@ -168,12 +280,29 @@ abilities:
     # hammer_storm_proc_ready ne s'efface jamais tout seul avec le temps
     # (front montant, cf. hooks.py) -- donc aucun proc perdu, juste retardé
     # d'un cran quand les deux tombent pile au même tick.
+    # EN: priority_st/cleave/aoe lowered from 2 to 4 (2026-07-15, requested by
+    # EN: the user): same principle already applied to skull_crusher_proc below
+    # EN: (lowered from 3 to 4 on 2026-07-12) -- heavy_strike (priority_st:3)
+    # EN: must win unambiguously every time its own cooldown is over, an
+    # EN: already-established key rotation point. Without off_gcd,
+    # EN: hammer_storm_proc shares the same GCD as heavy_strike: on a tick tie,
+    # EN: the loser waits at most ~1 GCD (~1s, cf. gcd_ms above), the flag
+    # EN: hammer_storm_proc_ready never clears on its own over time (rising
+    # EN: edge, cf. hooks.py) -- so no proc lost, just delayed by one step when
+    # EN: both land on the exact same tick.
     priority_st: 4
     priority_cleave: 4
     priority_aoe: 4
+    # EN (cooldown_ms:1): requested by the user (2026-07-12) -- the real
+    # EN: anti-double-cast guardrail is the rising edge + rearm on stack
+    # EN: increase (hooks.py), not this cooldown; a higher cooldown_ms only
+    # EN: delays an already-validated legit proc (cf. 14:16:38/14:16:40 in
+    # EN: debug.log, 2 real procs 2s apart).
     cooldown_ms: 1   # demandé par l'utilisateur (2026-07-12) -- le vrai garde-fou anti-double-cast est le front montant + réarmement sur augmentation de stacks (hooks.py), pas ce cooldown ; un cooldown_ms plus élevé ne fait que retarder un proc légitime déjà validé (cf. 14:16:38/14:16:40 dans debug.log, 2 procs réels à 2s d'écart)
     is_proc: true
     skip_detection: true
+    # EN (template): kept for reference -- no longer used for detection
+    # EN: (skip_detection:true), only by REGIONS["tariq"]["hammer_storm_stack_badge"]/state-update.
     template: hammer_storm   # gardé pour référence -- plus utilisé pour la détection (skip_detection:true), seulement par REGIONS["tariq"]["hammer_storm_stack_badge"]/état-update
     condition: fury_above:55, flag:hammer_storm_proc_ready
 
@@ -187,11 +316,25 @@ abilities:
   # rotation. priority_st descendue à 4 (skull_crusher/face_breaker/
   # chain_lightning/wild_swing décalées d'un cran en conséquence) pour que
   # heavy_strike gagne sans ambiguïté.
+  # EN: BUG FOUND IN-GAME (2026-07-12): priority_st was tied with heavy_strike
+  # EN: (3 everywhere) -- on the declaration-order tie-break (engine.py),
+  # EN: skull_crusher_proc being declared BEFORE heavy_strike in this file, it
+  # EN: systematically won the scan slot whenever both were ready at the same
+  # EN: time, delaying heavy_strike well past the end of its own cooldown --
+  # EN: whereas the user explicitly said heavy_strike must fire at EVERY cooldown
+  # EN: end, a key rotation point. priority_st lowered to 4 (skull_crusher/
+  # EN: face_breaker/chain_lightning/wild_swing shifted one step accordingly)
+  # EN: so heavy_strike wins unambiguously.
   # cooldown_ms remis à 1 par l'utilisateur (2026-07-12) -- le vrai garde-fou
   # anti-double-cast est le front montant (MIN_ABSENT_TICKS, hooks.py), pas
   # ce cooldown ; le fix de priority_st ci-dessus (elle ne vole plus le
   # créneau de scan de heavy_strike) a déjà réglé le symptôme observé
   # (double presse à 1s d'intervalle, 14:04:08/14:04:09).
+  # EN: cooldown_ms set back to 1 by the user (2026-07-12) -- the real
+  # EN: anti-double-cast guardrail is the rising edge (MIN_ABSENT_TICKS,
+  # EN: hooks.py), not this cooldown; the priority_st fix above (it no longer
+  # EN: steals heavy_strike's scan slot) already fixed the observed symptom
+  # EN: (double press 1s apart, 14:04:08/14:04:09).
   - name: skull_crusher_proc
     priority_st: 4
     priority_cleave: 3
@@ -206,6 +349,11 @@ abilities:
   # fois que son cooldown se termine, sans condition de fury -- l'ancienne
   # condition la bloquait au-dessus de 76% fury, contrairement à la vraie
   # mécanique.
+  # EN: cooldown_ms:1 was a placeholder -- real cooldown confirmed by the user:
+  # EN: 5.92s. Condition "not fury_above:76" removed (2026-07-12): the user
+  # EN: confirmed it's a key rotation point that must fire EVERY time its
+  # EN: cooldown ends, with no fury condition -- the old condition blocked it
+  # EN: above 76% fury, contrary to the real mechanic.
   # BUG TROUVÉ EN JEU (2026-07-12) : sans skip_detection, elle dépendait
   # d'un vrai match de template (confidence_threshold:0.61) pour partir --
   # en jeu réel, elle ratait ce check assez souvent pour que le scan tombe
@@ -213,6 +361,13 @@ abilities:
   # disponible (hors cooldown). skip_detection:true : le vrai cooldown
   # (5.92s) suffit comme garde-fou, plus de dépendance à la fiabilité de la
   # détection visuelle pour une ability qui DOIT toujours partir.
+  # EN: BUG FOUND IN-GAME (2026-07-12): without skip_detection, it depended on
+  # EN: a real template match (confidence_threshold:0.61) to fire -- in a real
+  # EN: game it missed that check often enough that the scan fell to
+  # EN: face_breaker/wild_swing instead, while it was actually available (off
+  # EN: cooldown). skip_detection:true: the real cooldown (5.92s) is enough as
+  # EN: a guardrail, no more dependence on visual-detection reliability for an
+  # EN: ability that MUST always fire.
   - name: heavy_strike
     priority_st: 3
     priority_cleave: 3
@@ -228,6 +383,14 @@ abilities:
   # (face_breaker/chain_lightning/wild_swing) et les procs (hammer_storm_proc/
   # skull_crusher_proc) ne sont volontairement PAS concernés par ce flag --
   # cf. commentaire complet dans hooks.py.
+  # EN: not flag:fury_conserve (2026-07-13): Planner wiring (cf. hooks.py) --
+  # EN: this is a DISCRETIONARY Fury DUMP (not a proc, not heavy_strike), held
+  # EN: back while focused_wrath/thunder_call align for a burst, to arrive at
+  # EN: that moment with as much Fury as possible (50%-reduced-cost window on
+  # EN: Hammer Storm/Skull Crusher). The generators (face_breaker/
+  # EN: chain_lightning/wild_swing) and the procs (hammer_storm_proc/
+  # EN: skull_crusher_proc) are deliberately NOT affected by this flag -- cf.
+  # EN: the full comment in hooks.py.
   #
   # fury_above:50 -> 30 (2026-07-13, demandé par l'utilisateur) : skull_crusher_proc
   # (probablement la même dépense sous-jacente) est documenté à fury_above:23
@@ -238,6 +401,15 @@ abilities:
   # 50->55) plutôt que de descendre directement à 23 sans preuve que cette
   # instance-ci partage exactement le même coût. PAS confirmé par des logs à
   # ce stade -- à valider en jeu comme le seuil de hammer_storm_proc l'a été.
+  # EN: fury_above:50 -> 30 (2026-07-13, requested by the user): skull_crusher_proc
+  # EN: (probably the same underlying cost) is documented at fury_above:23
+  # EN: "full cost" (cf. hooks.py, SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED)
+  # EN: -- 50 seemed oversized versus that value already validated elsewhere in
+  # EN: this file. 30 chosen as a safety margin above 23 (same spirit as the +5
+  # EN: margin already applied to hammer_storm_proc, 50->55) rather than
+  # EN: dropping straight to 23 without proof this instance shares exactly the
+  # EN: same cost. NOT confirmed by logs at this stage -- to validate in-game
+  # EN: like the hammer_storm_proc threshold was.
   - name: skull_crusher
     priority_st: 5
     priority_cleave: 4
@@ -252,6 +424,11 @@ abilities:
   # thunder_call, face_breaker n'est PAS off_gcd, donc le GCD normal (1s)
   # limitait déjà le spam en pratique -- mais 1ms restait faux et aurait pu
   # la faire spammer dès qu'un autre off_gcd libère un tick.
+  # EN: cooldown_ms:1 was a placeholder -- real cooldown confirmed by the user:
+  # EN: 4.44s (same value as Culling Strike). Unlike culling_strike/
+  # EN: thunder_call, face_breaker is NOT off_gcd, so the normal GCD (1s)
+  # EN: already limited spam in practice -- but 1ms was still wrong and could
+  # EN: have made it spam as soon as another off_gcd frees a tick.
   # skip_detection: true (2026-07-14) -- BUG TROUVÉ EN JEU (analyse vidéo +
   # logs Tariq de la session 23:20-00:00) : face_breaker était la SEULE
   # ability du kit encore SANS skip_detection, donc la seule à déclencher une
@@ -271,6 +448,24 @@ abilities:
   # légitimes. Bonus FPS : plus aucune capture d'écran sur le thread de
   # décision (le point soulevé par l'utilisateur), toute la détection lourde reste
   # cantonnée au thread de détection dédié.
+  # EN: skip_detection: true (2026-07-14) -- BUG FOUND IN-GAME (video analysis +
+  # EN: Tariq logs from the 23:20-00:00 session): face_breaker was the ONLY
+  # EN: ability in the kit still WITHOUT skip_detection, thus the only one to
+  # EN: trigger a screen capture (is_ready_fn -> template match) INSIDE the
+  # EN: priority scan, on every tick where it was reached. Two consequences,
+  # EN: both observed: (1) its template detection (icon, threshold 0.65) often
+  # EN: failed -> face_breaker almost never fired, exactly like heavy_strike/
+  # EN: skull_crusher/chain_lightning BEFORE the same fix was applied to them;
+  # EN: (2) when that capture RAISED (transient ScreenShotError/BitBlt), the
+  # EN: exception propagated and killed the whole tick -> wild_swing (lower
+  # EN: priority) never fired either, the rotation "froze" several seconds once
+  # EN: heavy_strike/procs were unavailable. The _safe_is_ready guardrail
+  # EN: (engine.py) now prevents (2) from freezing the scan, but the real fix
+  # EN: for (1) is the same as for the rest of the kit: the real cooldown
+  # EN: (4.44s, confirmed by the user) is enough as a guardrail, visual icon
+  # EN: detection is unreliable and delays legit casts. FPS bonus: no more
+  # EN: screen capture on the decision thread (the point the user raised), all
+  # EN: the heavy detection stays confined to the dedicated detection thread.
   - name: face_breaker
     priority_st: 6
     priority_cleave: 5
@@ -288,8 +483,20 @@ abilities:
   # wardenbot/state_update.py (plus de match du template grisé ni de pose du
   # debuff chain_lightning_dim). La condition ne garde que le gate de Fury
   # (not fury_above:85), inchangé.
+  # EN: NORMAL DETECTION (2026-07-14, the user's choice): chain_lightning returns
+  # EN: to standard detection -- it matches its OWN LIT icon (available) and
+  # EN: fires on ITS PRESENCE, like any ability in the project (skip_detection
+  # EN: absent -> is_ready_fn checks the template). the user recaptures the
+  # EN: template templates/tariq/chain_lightning.png on the LIT icon (no longer
+  # EN: the grayed one). The old INVERTED detection (grayed template + cast on
+  # EN: 'not debuff:chain_lightning_dim') is removed -- here AND in
+  # EN: wardenbot/state_update.py (no more grayed-template match nor setting of
+  # EN: the chain_lightning_dim debuff). The condition keeps only the Fury gate
+  # EN: (not fury_above:85), unchanged.
   # cooldown_ms:6100 était une estimation -- vraie valeur confirmée par
   # l'utilisateur : 5.92s.
+  # EN: cooldown_ms:6100 was an estimate -- real value confirmed by the user:
+  # EN: 5.92s.
   - name: chain_lightning
     priority_st: 7
     priority_cleave: 3
@@ -305,6 +512,13 @@ abilities:
   # fury=100% pile -- du gaspillage (rien à gagner à builder de la rage déjà
   # au plafond). La priorité la plus basse (8) garantit déjà "rien d'autre
   # disponible" ; not fury_above:90 ajoute la 2e condition "rage basse".
+  # EN: Condition added (2026-07-12): the user wants wild_swing as a pure filler
+  # EN: -- used only when nothing else is available AND rage is low, not when
+  # EN: it's already full/near the cap. Confirmed in debug.log BEFORE this fix:
+  # EN: 602 wild_swing presses, of which 71 (12%) at exactly fury=100% --
+  # EN: waste (nothing to gain building rage already at the ceiling). The
+  # EN: lowest priority (8) already guarantees "nothing else available"; not
+  # EN: fury_above:90 adds the 2nd condition "low rage".
   - name: wild_swing
     priority_st: 8
     priority_cleave: 7

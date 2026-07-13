@@ -1,12 +1,19 @@
 # =============================================================================
 # warden.yaml — config du moteur wardenbot (dialecte proche de Warden.yaml,
 # adapté pour laisser hooks.py piloter tout le combo system).
+# EN: warden.yaml — wardenbot engine config (dialect close to Warden.yaml,
+# EN: adapted to let hooks.py drive the whole combo system).
 # =============================================================================
 # Seules les 1res pièces de combo (earth_fist, wind_kick) + les abilities
 # hors-combo (stone_shield, shatter_earth, serenity) passent par le scan de
 # priorité normal. Tout le reste (spirit_palm, les 2e pièces *_2, le
 # finisher) est piloté par meiko_pre_tick -- inutile de leur donner une
 # priorité ici, ils ne sont même pas listés.
+# EN: Only the 1st combo pieces (earth_fist, wind_kick) + the non-combo
+# EN: abilities (stone_shield, shatter_earth, serenity) go through the normal
+# EN: priority scan. Everything else (spirit_palm, the 2nd pieces *_2, the
+# EN: finisher) is driven by meiko_pre_tick -- no need to give them a priority
+# EN: here, they aren't even listed.
 # =============================================================================
 
 gcd_ms: 1100
@@ -26,6 +33,7 @@ abilities:
     cooldown_ms: 60000
 
   # ST (1-2 cibles) : Earth Fist en premier -> Rising Earth / Earthfist Barrage
+  # EN: ST (1-2 targets): Earth Fist first -> Rising Earth / Earthfist Barrage
   - name: earth_fist
     priority_st: 2
     priority_aoe: 4
@@ -34,6 +42,8 @@ abilities:
 
   # AoE (3+ cibles) : Wind Kick en premier -> Rising Storm / Lashing Stormkick
   # (c'est ce combo qui stack Warden of the Temple)
+  # EN: AoE (3+ targets): Wind Kick first -> Rising Storm / Lashing Stormkick
+  # EN: (this is the combo that stacks Warden of the Temple)
   - name: wind_kick
     priority_st: 4
     priority_aoe: 2
