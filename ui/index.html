@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>WardenBot</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="nebula"></div>
+  <canvas id="particles"></canvas>
+
+  <div class="app">
+    <!-- Barre de navigation haute -->
+    <header class="glass topbar">
+      <div class="brand">
+        <span class="brand-mark"></span>
+        <span class="brand-name">WardenBot</span>
+      </div>
+      <div class="topbar-meta">
+        <span class="meta-chip" id="profile-chip">Profil : Default</span>
+        <span class="meta-chip" id="character-chip">Personnage : Tariq</span>
+      </div>
+    </header>
+
+    <div class="body">
+      <!-- Barre latérale -->
+      <nav class="glass sidebar">
+        <button class="nav-btn active" data-view="dashboard">Dashboard</button>
+        <button class="nav-btn" data-view="calibration">Calibration</button>
+        <button class="nav-btn" data-view="profiles">Profiles</button>
+        <button class="nav-btn" data-view="logs">Logs</button>
+      </nav>
+
+      <!-- Contenu principal -->
+      <main class="content">
+        <!-- Carte de statut centrale -->
+        <section class="glass status-card">
+          <div class="status-glow"></div>
+          <div class="status-label">État du bot</div>
+          <div class="status-line">
+            <span class="status-dot" id="status-dot"></span>
+            <div class="status-value running" id="bot-status">Bot Running</div>
+          </div>
+        </section>
+
+        <!-- Métriques live -->
+        <section class="metrics-row">
+          <div class="glass metric-card">
+            <div class="metric-icon">◎</div>
+            <div class="metric-label">FPS Capture</div>
+            <div class="metric-value" id="metric-fps">60</div>
+          </div>
+          <div class="glass metric-card">
+            <div class="metric-icon">⚡</div>
+            <div class="metric-label">Dernière action</div>
+            <div class="metric-value" id="metric-last-action">heavy_strike</div>
+          </div>
+          <div class="glass metric-card">
+            <div class="metric-icon">◈</div>
+            <div class="metric-label">Profil actif</div>
+            <div class="metric-value" id="metric-profile">Default</div>
+          </div>
+          <div class="glass metric-card">
+            <div class="metric-icon">✓</div>
+            <div class="metric-label">Dernière erreur</div>
+            <div class="metric-value metric-value-ok" id="metric-error">Aucune</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Barre de contrôle basse -->
+    <footer class="glass controlbar">
+      <button class="control-btn control-start" id="btn-start">▶ Start</button>
+      <button class="control-btn control-pause" id="btn-pause">⏸ Pause</button>
+      <button class="control-btn control-stop" id="btn-stop">⏹ Stop</button>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

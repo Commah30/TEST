@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "resolution": "2560x1440",
+  "dpi_scale": 100,
+  "game_ui_scale": 1.0,
+  "characters": {
+    "meiko": {
+      "keybinds": {
+        "stone_shield": "5",
+        "shatter_earth": "6",
+        "earth_fist": "3",
+        "wind_kick": "2",
+        "spirit_palm": "1",
+        "earth_fist_2": "3",
+        "wind_kick_2": "2",
+        "spirit_palm_2": "1",
+        "fighting_techniques": "4",
+        "serenity": "7"
+      },
+      "regions": {
+        "spirit_palm": {"left": 1032, "top": 1331, "width": 51, "height": 50},
+        "wind_kick": {"left": 1095, "top": 1329, "width": 52, "height": 53},
+        "earth_fist": {"left": 1161, "top": 1332, "width": 45, "height": 47},
+        "fighting_techniques": {"left": 1224, "top": 1329, "width": 48, "height": 50},
+        "stormfall_lit": {"left": 572, "top": 864, "width": 10, "height": 10},
+        "buff_bar": {"left": 2096, "top": 1183, "width": 223, "height": 47}
+      }
+    },
+    "tariq": {
+      "keybinds": {
+        "heavy_strike": "1",
+        "wild_swing": "2",
+        "face_breaker": "3",
+        "skull_crusher": "4",
+        "hammer_storm_proc": "5",
+        "thunder_call": "6",
+        "chain_lightning": "7",
+        "culling_strike": "shift+3",
+        "focused_wrath": "q",
+        "skull_crusher_proc": "4"
+      },
+      "regions": {
+        "heavy_strike": {"left": 1023, "top": 1239, "width": 51, "height": 48},
+        "wild_swing": {"left": 1089, "top": 1240, "width": 49, "height": 51},
+        "face_breaker": {"left": 1152, "top": 1240, "width": 51, "height": 49},
+        "skull_crusher": {"left": 1217, "top": 1240, "width": 50, "height": 50},
+        "hammer_storm": {"left": 1280, "top": 1241, "width": 49, "height": 48},
+        "thunder_call": {"left": 1344, "top": 1240, "width": 50, "height": 50},
+        "chain_lightning": {"left": 1408, "top": 1239, "width": 49, "height": 51},
+        "focused_wrath": {"left": 1216, "top": 1175, "width": 50, "height": 53},
+        "culling_strike": {"left": 1152, "top": 1176, "width": 51, "height": 50},
+        "rage_bar": {"left": 446, "top": 924, "width": 141, "height": 5},
+        "tariq_buff_bar": {"left": 970, "top": 1280, "width": 350, "height": 150},
+        "hammer_storm_stack_badge": {"left": 1182, "top": 1354, "width": 28, "height": 20},
+        "hammer_storm_cast_bar": {"left": 1123, "top": 931, "width": 296, "height": 4}
+      }
+    }
+  }
+}

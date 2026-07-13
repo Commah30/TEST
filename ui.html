@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WARDENBOT // MISSION CONTROL</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Orbitron:wght@500;700;900&display=swap');
+
+:root{
+  --bg:#060A12;
+  --bg2:#0A1220;
+  --panel:rgba(12,22,38,0.72);
+  --grid:rgba(56,189,248,0.06);
+  --cyan:#38E1FF;
+  --cyan-dim:#1a6b7d;
+  --amber:#FFB020;
+  --green:#3BF08A;
+  --red:#FF4D6A;
+  --magenta:#C264FF;
+  --ink:#8FA6C4;
+  --ink-dim:#4A5C78;
+  --line:rgba(56,189,248,0.16);
+}
+
+*{margin:0;padding:0;box-sizing:border-box}
+
+body{
+  background:var(--bg);
+  background-image:
+    radial-gradient(ellipse 80% 60% at 50% -10%, rgba(56,225,255,0.08), transparent 60%),
+    radial-gradient(ellipse 70% 50% at 100% 100%, rgba(194,100,255,0.06), transparent 55%);
+  color:var(--ink);
+  font-family:'JetBrains Mono',monospace;
+  min-height:100vh;
+  overflow-x:hidden;
+  position:relative;
+}
+
+/* grille technique de fond */
+body::before{
+  content:'';
+  position:fixed;inset:0;
+  background-image:
+    linear-gradient(var(--grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:44px 44px;
+  pointer-events:none;
+  z-index:0;
+}
+
+.shell{position:relative;z-index:1;display:flex;min-height:100vh}
+
+/* --- RAIL NAV --- */
+.rail{
+  width:68px;flex-shrink:0;
+  border-right:1px solid var(--line);
+  background:rgba(6,10,18,0.6);
+  display:flex;flex-direction:column;align-items:center;
+  padding:18px 0;gap:6px;
+}
+.rail .logo{
+  font-family:'Orbitron';font-weight:900;font-size:20px;color:var(--cyan);
+  writing-mode:vertical-rl;letter-spacing:3px;margin-bottom:24px;
+  text-shadow:0 0 12px rgba(56,225,255,0.6);
+}
+.navicon{
+  width:42px;height:42px;border:1px solid transparent;border-radius:8px;
+  display:flex;align-items:center;justify-content:center;
+  color:var(--ink-dim);cursor:pointer;transition:all .2s;font-size:18px;position:relative;
+}
+.navicon:hover{color:var(--cyan);border-color:var(--line)}
+.navicon.active{color:var(--cyan);background:rgba(56,225,255,0.08);border-color:var(--cyan-dim)}
+.navicon.active::before{
+  content:'';position:absolute;left:-18px;top:50%;transform:translateY(-50%);
+  width:3px;height:22px;background:var(--cyan);border-radius:2px;
+  box-shadow:0 0 8px var(--cyan);
+}
+
+/* --- MAIN --- */
+.main{flex:1;padding:20px 26px;display:flex;flex-direction:column;gap:16px;max-width:1500px}
+
+.topbar{display:flex;justify-content:space-between;align-items:flex-end;
+  border-bottom:1px solid var(--line);padding-bottom:14px}
+.title-block h1{
+  font-family:'Orbitron';font-weight:700;font-size:24px;color:#EAF6FF;letter-spacing:2px;
+}
+.title-block .sub{font-size:11px;color:var(--ink-dim);letter-spacing:2px;margin-top:3px}
+.title-block .sub b{color:var(--magenta)}
+.topmeta{text-align:right;font-size:11px;line-height:1.7}
+.topmeta .k{color:var(--ink-dim)}
+.topmeta .v{color:var(--cyan)}
+
+/* status hero */
+.hero{
+  display:flex;align-items:center;gap:20px;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  padding:18px 24px;backdrop-filter:blur(12px);position:relative;overflow:hidden;
+}
+.hero::after{
+  content:'';position:absolute;left:0;top:0;bottom:0;width:3px;
+  background:var(--green);box-shadow:0 0 16px var(--green);
+}
+.pulse{
+  width:14px;height:14px;border-radius:50%;background:var(--green);
+  box-shadow:0 0 0 0 rgba(59,240,138,0.7);animation:pulse 1.6s infinite;flex-shrink:0;
+}
+@keyframes pulse{
+  0%{box-shadow:0 0 0 0 rgba(59,240,138,0.6)}
+  70%{box-shadow:0 0 0 14px rgba(59,240,138,0)}
+  100%{box-shadow:0 0 0 0 rgba(59,240,138,0)}
+}
+.hero .state{font-family:'Orbitron';font-weight:700;font-size:26px;color:var(--green);letter-spacing:3px;
+  text-shadow:0 0 14px rgba(59,240,138,0.5)}
+.hero .timecode{margin-left:auto;text-align:right}
+.hero .timecode .lbl{font-size:10px;color:var(--ink-dim);letter-spacing:2px}
+.hero .timecode .val{font-size:22px;color:#EAF6FF;font-weight:500;letter-spacing:2px}
+.spark{display:flex;align-items:flex-end;gap:2px;height:34px;margin-left:8px}
+.spark i{width:3px;background:var(--cyan);opacity:.8;border-radius:1px;animation:spark 1.1s infinite ease-in-out}
+@keyframes spark{0%,100%{height:20%}50%{height:100%}}
+
+/* content grid */
+.grid{display:grid;grid-template-columns:1fr 340px;gap:16px;align-items:start}
+
+.panel{
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  backdrop-filter:blur(12px);overflow:hidden;
+}
+.panel .phead{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:11px 16px;border-bottom:1px solid var(--line);
+}
+.phead .ptitle{font-size:12px;color:var(--cyan);letter-spacing:1.5px}
+.phead .ptitle::before{content:'▸ ';color:var(--cyan-dim)}
+.live{font-size:10px;color:var(--green);letter-spacing:1px;display:flex;align-items:center;gap:5px}
+.live::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--green);
+  box-shadow:0 0 6px var(--green);animation:blink 1.4s infinite}
+@keyframes blink{50%{opacity:.3}}
+
+/* metric modules */
+.modules{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:16px}
+.mod{
+  border:1px solid var(--line);border-radius:9px;padding:13px 15px;position:relative;
+  background:rgba(8,16,28,0.5);transition:border-color .2s;
+}
+.mod:hover{border-color:var(--cyan-dim)}
+.mod .mlabel{font-size:10px;color:var(--ink-dim);letter-spacing:1.5px;margin-bottom:8px}
+.mod .mval{font-size:26px;color:#EAF6FF;font-weight:700;font-family:'Orbitron';letter-spacing:1px}
+.mod .mval.cyan{color:var(--cyan)}
+.mod .mval.green{color:var(--green)}
+.mod .mval.amber{color:var(--amber)}
+.mod .munit{font-size:12px;color:var(--ink-dim);font-family:'JetBrains Mono';margin-left:4px}
+.mod .accent{position:absolute;top:0;right:0;width:34px;height:2px;background:var(--magenta);
+  box-shadow:0 0 8px var(--magenta)}
+.mod .bar{height:4px;background:rgba(56,225,255,0.12);border-radius:2px;margin-top:9px;overflow:hidden}
+.mod .bar i{display:block;height:100%;background:var(--cyan);box-shadow:0 0 8px var(--cyan);border-radius:2px}
+.mod .bar i.amber{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+
+/* fury gauge big */
+.gauge-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 16px 16px}
+.gauge{border:1px solid var(--line);border-radius:9px;padding:14px;background:rgba(8,16,28,0.5)}
+.gauge .glabel{font-size:10px;color:var(--ink-dim);letter-spacing:1.5px;margin-bottom:10px;
+  display:flex;justify-content:space-between}
+.gauge .glabel b{color:var(--cyan)}
+.gaugebar{height:10px;background:rgba(0,0,0,0.4);border:1px solid var(--line);border-radius:5px;overflow:hidden;position:relative}
+.gaugebar i{display:block;height:100%;background:linear-gradient(90deg,var(--cyan-dim),var(--cyan));
+  box-shadow:0 0 10px var(--cyan)}
+.gaugebar.g2 i{background:linear-gradient(90deg,#7a5410,var(--amber));box-shadow:0 0 10px var(--amber)}
+
+/* proc detection radar */
+.radar-wrap{padding:16px;display:flex;flex-direction:column;align-items:center;gap:12px}
+.radar{width:230px;height:230px;border-radius:50%;position:relative;
+  background:radial-gradient(circle,rgba(56,225,255,0.06),rgba(6,10,18,0.9));
+  border:1px solid var(--cyan-dim);box-shadow:0 0 30px rgba(56,225,255,0.12) inset,0 0 20px rgba(56,225,255,0.1)}
+.radar::before{content:'';position:absolute;inset:0;border-radius:50%;
+  background:conic-gradient(from 0deg,transparent 0deg,rgba(56,225,255,0.25) 40deg,transparent 60deg);
+  animation:sweep 3.5s linear infinite}
+@keyframes sweep{to{transform:rotate(360deg)}}
+.radar .ring{position:absolute;border:1px solid rgba(56,225,255,0.12);border-radius:50%}
+.radar .ring.r1{inset:25%}.radar .ring.r2{inset:12%}
+.radar .cross{position:absolute;background:rgba(56,225,255,0.1)}
+.radar .cross.h{left:6%;right:6%;top:50%;height:1px}
+.radar .cross.v{top:6%;bottom:6%;left:50%;width:1px}
+.blip{position:absolute;width:9px;height:9px;border-radius:50%;transform:translate(-50%,-50%)}
+.blip.on{background:var(--green);box-shadow:0 0 10px var(--green);animation:blink 1.2s infinite}
+.blip.off{background:var(--ink-dim);opacity:.4}
+.blip .tag{position:absolute;left:12px;top:-4px;font-size:9px;white-space:nowrap;color:var(--cyan)}
+.radar-legend{display:flex;gap:16px;font-size:10px}
+.radar-legend span{display:flex;align-items:center;gap:5px;color:var(--ink)}
+.dot{width:7px;height:7px;border-radius:50%}
+.dot.g{background:var(--green);box-shadow:0 0 6px var(--green)}
+.dot.d{background:var(--ink-dim)}
+
+/* data stream */
+.stream{padding:14px 16px;font-size:11px;line-height:1.85;max-height:180px;overflow-y:auto}
+.stream .row{display:flex;gap:10px;white-space:nowrap}
+.stream .ts{color:var(--ink-dim)}
+.stream .arrow{color:var(--green)}
+.stream .act{color:var(--cyan)}
+.stream .proc{color:var(--magenta)}
+.stream .idle{color:var(--ink-dim)}
+
+/* footer buttons */
+.controls{display:flex;gap:14px;padding-top:4px}
+.btn{
+  flex:1;padding:15px;border-radius:10px;background:rgba(8,16,28,0.6);
+  border:1px solid var(--line);color:#EAF6FF;font-family:'Orbitron';font-weight:700;
+  font-size:14px;letter-spacing:2px;cursor:pointer;transition:all .2s;
+  display:flex;align-items:center;justify-content:center;gap:9px;
+}
+.btn:hover{transform:translateY(-2px)}
+.btn.start{border-color:rgba(59,240,138,0.4);color:var(--green)}
+.btn.start:hover{background:rgba(59,240,138,0.1);box-shadow:0 0 20px rgba(59,240,138,0.25)}
+.btn.pause{border-color:rgba(255,176,32,0.4);color:var(--amber)}
+.btn.pause:hover{background:rgba(255,176,32,0.1);box-shadow:0 0 20px rgba(255,176,32,0.25)}
+.btn.stop{border-color:rgba(255,77,106,0.4);color:var(--red)}
+.btn.stop:hover{background:rgba(255,77,106,0.1);box-shadow:0 0 20px rgba(255,77,106,0.25)}
+
+.footline{display:flex;justify-content:space-between;font-size:10px;color:var(--ink-dim);
+  letter-spacing:1px;padding-top:6px;border-top:1px solid var(--line);margin-top:2px}
+.footline .ok{color:var(--green)}
+
+@media(max-width:900px){.grid{grid-template-columns:1fr}.rail{display:none}}
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- RAIL -->
+  <nav class="rail">
+    <div class="logo">WB</div>
+    <div class="navicon active" title="Dashboard" onclick="tab('dashboard',this)">⧉</div>
+    <div class="navicon" title="Calibration" onclick="tab('calibration',this)">◎</div>
+    <div class="navicon" title="Profiles" onclick="tab('profiles',this)">⿻</div>
+    <div class="navicon" title="Logs" onclick="tab('logs',this)">☰</div>
+  </nav>
+
+  <!-- MAIN -->
+  <div class="main">
+
+    <!-- TOP -->
+    <div class="topbar">
+      <div class="title-block">
+        <h1>WARDENBOT</h1>
+        <div class="sub">TARIQ_ROTATION <b>SCHISM_V2</b> · PIXEL_DETECTION_ENGINE</div>
+      </div>
+      <div class="topmeta">
+        <div><span class="k">SYS_TIME:</span> <span class="v" id="clock">14:39:31</span></div>
+        <div><span class="k">TICK_RATE:</span> <span class="v">60 Hz</span></div>
+      </div>
+    </div>
+
+    <!-- HERO STATUS -->
+    <div class="hero">
+      <div class="pulse"></div>
+      <div class="state">BOT RUNNING</div>
+      <div class="spark" id="spark"></div>
+      <div class="timecode">
+        <div class="lbl">SESSION_UPTIME</div>
+        <div class="val" id="uptime">00:14:32</div>
+      </div>
+    </div>
+
+    <div id="view-dashboard" class="view"><!-- GRID -->
+    <div class="grid">
+
+      <!-- LEFT COLUMN -->
+      <div style="display:flex;flex-direction:column;gap:16px">
+
+        <!-- metric modules -->
+        <div class="panel">
+          <div class="phead"><span class="ptitle">TELEMETRY</span><span class="live">LIVE_FEED</span></div>
+          <div class="modules">
+            <div class="mod">
+              <div class="accent"></div>
+              <div class="mlabel">FPS / CAPTURE</div>
+              <div class="mval cyan"><span id="fps">60</span><span class="munit">fps</span></div>
+              <div class="bar"><i style="width:100%"></i></div>
+            </div>
+            <div class="mod">
+              <div class="accent"></div>
+              <div class="mlabel">LAST_ACTION</div>
+              <div class="mval" id="lastAction" style="font-size:18px;margin-top:6px">heavy_strike</div>
+              <div class="bar"><i class="amber" style="width:64%"></i></div>
+            </div>
+            <div class="mod">
+              <div class="accent"></div>
+              <div class="mlabel">ACTIVE_PROFILE</div>
+              <div class="mval" id="profile" style="font-size:18px;margin-top:6px">Default</div>
+              <div class="bar"><i style="width:40%"></i></div>
+            </div>
+            <div class="mod">
+              <div class="accent"></div>
+              <div class="mlabel">LAST_ERROR</div>
+              <div class="mval green" id="lastError" style="font-size:18px;margin-top:6px">None</div>
+              <div class="bar"><i style="width:100%;background:var(--green);box-shadow:0 0 8px var(--green)"></i></div>
+            </div>
+          </div>
+
+          <!-- gauges FURY + GCD -->
+          <div class="gauge-row">
+            <div class="gauge">
+              <div class="glabel"><span>FURY</span><b id="furyv">71%</b></div>
+              <div class="gaugebar"><i id="furybar" style="width:71%"></i></div>
+            </div>
+            <div class="gauge">
+              <div class="glabel"><span>GCD_REMAINING</span><b style="color:var(--amber)" id="gcdv">0.00s</b></div>
+              <div class="gaugebar g2"><i id="gcdbar" style="width:4%"></i></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- data stream -->
+        <div class="panel">
+          <div class="phead"><span class="ptitle">DATA_STREAM // ROTATION_LOG</span><span class="live">STREAMING</span></div>
+          <div class="stream" id="stream"></div>
+        </div>
+
+      </div>
+
+      <!-- RIGHT COLUMN : proc radar -->
+      <div class="panel">
+        <div class="phead"><span class="ptitle">PROC_SCANNER.sys</span><span class="live">ACTIVE</span></div>
+        <div class="radar-wrap">
+          <div class="radar">
+            <div class="ring r1"></div><div class="ring r2"></div>
+            <div class="cross h"></div><div class="cross v"></div>
+            <div class="blip on" data-buff="hammer_storm_empowered" style="left:62%;top:40%"><span class="tag">hammer_storm</span></div>
+            <div class="blip on" data-buff="skull_crusher_empowered" style="left:38%;top:58%"><span class="tag">skull_crusher</span></div>
+            <div class="blip off" data-buff="focused_wrath_empowered" style="left:70%;top:66%"><span class="tag" style="color:var(--ink-dim)">focused_wrath</span></div>
+            <div class="blip off" style="left:30%;top:32%"><span class="tag" style="color:var(--ink-dim)">culling</span></div>
+          </div>
+          <div class="radar-legend">
+            <span><i class="dot g"></i> PROC_ACTIVE</span>
+            <span><i class="dot d"></i> NO_MATCH</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- CONTROLS -->
+    <div class="controls">
+      <button class="btn start" onclick="ctl('start')">▶ START</button>
+      <button class="btn pause" onclick="ctl('pause')">❚❚ PAUSE (C)</button>
+      <button class="btn stop" onclick="ctl('stop')">■ STOP</button>
+    </div>
+
+    </div>
+      <div id="view-calibration" class="view" style="display:none">
+        <div class="panel"><div class="phead"><span class="ptitle">CALIBRATION.sys</span></div>
+          <div style="padding:24px;line-height:2">
+            <p style="color:var(--ink)">Lance une passe de calibration des templates (matcher.py).</p>
+            <button class="btn start" style="max-width:240px;margin-top:16px" onclick="runCalib()">LANCER CALIBRATION</button>
+          </div></div></div>
+      <div id="view-profiles" class="view" style="display:none">
+        <div class="panel"><div class="phead"><span class="ptitle">PROFILES.cfg</span></div>
+          <div style="padding:24px;line-height:2.2">
+            <label style="color:var(--ink-dim);font-size:11px;letter-spacing:1.5px">ROTATION_PROFILE</label><br>
+            <select id="profileSelect" onchange="changeProfile(this.value)"
+              style="margin-top:10px;background:var(--bg2);color:var(--cyan);border:1px solid var(--line);padding:10px 14px;font-family:'JetBrains Mono';font-size:14px;border-radius:8px;min-width:280px"></select>
+            <p style="color:var(--ink-dim);font-size:11px;margin-top:14px">Charge config/&lt;profil&gt;.yaml</p>
+          </div></div></div>
+      <div id="view-logs" class="view" style="display:none">
+        <div class="panel"><div class="phead"><span class="ptitle">DEBUG.log</span><span class="live">TAIL</span></div>
+          <pre id="logbox" style="padding:16px;font-size:11px;color:var(--ink);max-height:520px;overflow:auto;white-space:pre-wrap;margin:0"></pre>
+        </div></div>
+
+    <div class="footline">
+      <span><span class="ok" id="linkdot">●</span> <span id="linkstatus">ENGINE_LINK_ACTIVE</span> · mss + opencv + pydirectinput</span>
+      <span>LAST_UPDATE: <span id="lastup">14:39:31</span> · CONFIDENCE: <span id="confv">98%</span></span>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const spark=document.getElementById('spark');
+for(let i=0;i<12;i++){const b=document.createElement('i');b.style.animationDelay=(i*0.09)+'s';spark.appendChild(b)}
+function pad(n){return String(n).padStart(2,'0')}
+function kindLabel(k){return k==='proc'?'CAST(proc)':k==='skip'?'SKIP':'CAST'}
+let api=null;
+window.addEventListener('pywebviewready',()=>{api=window.pywebview.api;initProfiles();poll();});
+function render(s){
+  const st=(s.status||'stopped').toUpperCase();
+  const hs=document.querySelector('.hero .state'),hd=document.querySelector('.hero .pulse');
+  hs.textContent='BOT '+st;
+  const col=s.status==='running'?'var(--green)':s.status==='paused'?'var(--amber)':'var(--red)';
+  hs.style.color=col;hd.style.background=col;
+  document.getElementById('fps').textContent=s.fps??60;
+  document.getElementById('lastAction').textContent=s.last_cast||'—';
+  document.getElementById('profile').textContent=s.profile||'Default';
+  const err=document.getElementById('lastError');
+  err.textContent=s.last_error?String(s.last_error):'None';
+  err.className='mval '+(s.last_error?'':'green');
+  const fury=Math.round((s.resources?.fury??0)*100);
+  document.getElementById('furyv').textContent=fury+'%';
+  document.getElementById('furybar').style.width=fury+'%';
+  const gcd=(s.locks?.gcd_remaining_s??0);
+  document.getElementById('gcdv').textContent=gcd.toFixed(2)+'s';
+  document.getElementById('gcdbar').style.width=Math.min(100,gcd/0.9*100)+'%';
+  document.querySelectorAll('.blip').forEach(b=>{
+    const n=b.dataset.buff;if(!n)return;
+    const on=s.buffs&&s.buffs[n];b.className='blip '+(on?'on':'off');
+    const t=b.querySelector('.tag');if(t)t.style.color=on?'var(--cyan)':'var(--ink-dim)';
+  });
+  const stream=document.getElementById('stream');stream.innerHTML='';
+  (s.recent_casts||[]).forEach(r=>{
+    const row=document.createElement('div');row.className='row';
+    const c=r.kind==='proc'?'proc':r.kind==='skip'?'idle':'act';
+    row.innerHTML='<span class="ts">'+r.ts+'</span><span class="arrow">></span><span class="'+c+'">'+kindLabel(r.kind)+': '+r.action+'</span>';
+    stream.appendChild(row);
+  });
+  document.getElementById('confv').textContent=Math.round((s.confidence??0)*100)+'%';
+}
+async function poll(){if(!api)return;try{render(await api.get_state());}catch(e){}}
+setInterval(poll,250);
+async function ctl(a){if(!api)return;await api[a]();poll();}
+async function initProfiles(){const s=await api.get_state();const sel=document.getElementById('profileSelect');
+  if(sel)sel.innerHTML=(s.profiles||[]).map(p=>'<option '+(p===s.profile?'selected':'')+'>'+p+'</option>').join('');}
+async function changeProfile(v){if(api)await api.set_profile(v);poll();}
+async function runCalib(){if(!api)return;const r=await api.calibrate();alert(r.msg||'OK');}
+function tab(name,el){
+  document.querySelectorAll('.navicon').forEach(n=>n.classList.remove('active'));
+  el.classList.add('active');
+  document.querySelectorAll('.view').forEach(v=>v.style.display='none');
+  document.getElementById('view-'+name).style.display='';
+  if(name==='logs')loadLogs();
+}
+async function loadLogs(){if(!api)return;const r=await api.get_logs(200);
+  document.getElementById('logbox').textContent=(r.lines||[]).join('\n');}
+setInterval(()=>{const n=new Date();
+  document.getElementById('clock').textContent=pad(n.getHours())+':'+pad(n.getMinutes())+':'+pad(n.getSeconds());},1000);
+</script>
+</body>
+</html>

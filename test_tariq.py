@@ -219,27 +219,29 @@ def test_fury_above_condition_token():
     print("Token fury_above:N évalué correctement.")
 
 
-def test_chain_lightning_condition_fires_on_absence_of_dim_template():
-    """Le template chain_lightning capturé est l'icône GRISÉE (indisponible),
-    pas l'icône allumée (activée par thunder_call) -- la condition dans
-    config/tariq.yaml doit donc caster sur l'ABSENCE du debuff 'dim', pas sa
-    présence (cf. make_tariq_state_update_fn dans main.py)."""
-    condition = "not fury_above:85, not debuff:chain_lightning_dim"
+def test_chain_lightning_uses_normal_detection_with_only_fury_gate():
+    """DÉTECTION NORMALE (2026-07-14, choix de l'utilisateur) : chain_lightning est
+    repassée en détection standard -- elle matche sa PROPRE icône allumée via
+    is_ready_fn (comme toute ability sans skip_detection), et sa condition YAML
+    ne garde plus que le gate de Fury (not fury_above:85). Plus de
+    'not debuff:chain_lightning_dim' (l'ancienne détection inversée du template
+    grisé a été retirée, cf. config/tariq.yaml + wardenbot/state_update.py)."""
+    abilities, _ = load_abilities("config/tariq.yaml")
+    chain = [a for a in abilities if a.name == "chain_lightning"][0]
+
+    # La détection se fait maintenant par template (is_ready_fn), pas par une
+    # condition inversée -> skip_detection doit être False et la condition ne
+    # doit plus référencer chain_lightning_dim.
+    assert chain.skip_detection is False, "chain_lightning doit repasser en détection normale (skip_detection=False)"
+    assert "chain_lightning_dim" not in chain.condition, f"la condition ne doit plus référencer le debuff grisé, reçu {chain.condition!r}"
+
+    # Seul le gate de Fury reste : bloquée au-dessus de 85%, libre en-dessous.
     state = State()
-    state.resources["fury"] = 0.50  # sous le seuil -> ce n'est pas ce qui bloque ici
-
-    # Détection pas encore branchée (debuff jamais mis à jour) -> absent par
-    # défaut -> ne bloque pas.
-    assert evaluate_condition(condition, state) is True
-
-    # Icône détectée grisée -> bloqué.
-    state.debuffs["chain_lightning_dim"] = True
-    assert evaluate_condition(condition, state) is False
-
-    # Icône plus grisée (passée au bleu clair, thunder_call vient de l'activer) -> débloqué.
-    state.debuffs["chain_lightning_dim"] = False
-    assert evaluate_condition(condition, state) is True
-    print("chain_lightning : caste bien sur l'ABSENCE du grisé, pas sa présence.")
+    state.resources["fury"] = 0.90
+    assert evaluate_condition(chain.condition, state) is False, "au-dessus de 85% Fury, chain_lightning doit être bloquée"
+    state.resources["fury"] = 0.50
+    assert evaluate_condition(chain.condition, state) is True, "sous 85% Fury, la condition passe (la détection template gère le reste)"
+    print("chain_lightning : détection normale, seul le gate de Fury (not fury_above:85) reste dans la condition.")
 
 
 def test_bar_reader_ltr_and_rtl_directions():
@@ -317,6 +319,12 @@ def test_hammer_storm_proc_fires_on_any_single_proc():
     state.debuffs["culling_strike_dim"] = True  # cible pas sous 35% PV -> indisponible
     state.cooldown_until["thunder_call"] = time.monotonic() + 999.0  # déjà utilisée récemment (cooldown 43s)
     state.cooldown_until["focused_wrath"] = time.monotonic() + 999.0  # déjà utilisée récemment (cooldown 86s)
+    # heavy_strike (priority_st:3) gagne désormais sans ambiguïté sur
+    # hammer_storm_proc (priority_st:4 depuis 2026-07-15, cf. config/tariq.yaml)
+    # -- gaté ici comme les 3 autres ci-dessus pour isoler ce que ce test
+    # vérifie vraiment (hammer_storm_proc part sans focused_wrath_empowered),
+    # sans dépendre de l'arbitrage heavy_strike/hammer_storm_proc lui-même.
+    state.cooldown_until["heavy_strike"] = time.monotonic() + 999.0
 
     engine = RotationEngine(
         abilities=abilities,
@@ -737,6 +745,39 @@ def test_press_confirmation_abandoned_not_phantom_after_pause_gap():
     print("Écart type pause -> confirmation abandonnée silencieusement, pas de faux PHANTOM_PRESS.")
 
 
+def test_debug_choice_reason_explains_why_the_winner_beat_the_runner_up():
+    """AUDIT (2026-07-14) : trou d'observabilité trouvé dans l'audit rotation/
+    stabilité -- debug_skip_trace répond à 'pourquoi PAS X' (seulement quand
+    rien n'est pressé), mais rien ne répondait à 'pourquoi X A gagné' quand
+    une ability EST choisie. Vérifie que _pick_ability remplit
+    state.debug_choice_reason avec sa priorité et le concurrent de priorité
+    plus haute qu'il a devancé."""
+    abilities, meta = load_abilities("config/tariq.yaml")
+    state = State(mode="st")
+    state.resources["fury"] = 1.0
+    state.flags["hammer_storm_proc_ready"] = True
+    state.debuffs["culling_strike_dim"] = True
+    state.cooldown_until["thunder_call"] = time.monotonic() + 999.0
+    state.cooldown_until["focused_wrath"] = time.monotonic() + 999.0
+    # heavy_strike (priority_st:3) gagne désormais sur hammer_storm_proc
+    # (priority_st:4 depuis 2026-07-15) -- gaté pour isoler ce que ce test
+    # vérifie (le contenu de debug_choice_reason), cf. même fix dans
+    # test_hammer_storm_proc_fires_on_any_single_proc ci-dessus.
+    state.cooldown_until["heavy_strike"] = time.monotonic() + 999.0
+
+    engine = RotationEngine(
+        abilities=abilities, state=state,
+        press_fn=lambda name: None, is_ready_fn=lambda name, threshold=None: True,
+        gcd_ms=meta.get("gcd_ms", 1000),
+    )
+    pressed = engine.tick()
+    assert pressed == "hammer_storm_proc"
+    assert "priority=4" in state.debug_choice_reason
+    assert "devançait" in state.debug_choice_reason
+    print(f"choice_reason: {state.debug_choice_reason!r}")
+    print("debug_choice_reason explique bien pourquoi hammer_storm_proc a gagné.")
+
+
 if __name__ == "__main__":
     test_ready_flag_arms_only_on_rising_edge()
     test_stuck_active_reading_does_not_rearm_after_consumption()
@@ -747,7 +788,7 @@ if __name__ == "__main__":
     test_priority_cleave_is_a_distinct_mode_from_st_and_aoe()
     test_condition_per_mode_falls_back_to_generic_condition()
     test_fury_above_condition_token()
-    test_chain_lightning_condition_fires_on_absence_of_dim_template()
+    test_chain_lightning_uses_normal_detection_with_only_fury_gate()
     test_bar_reader_ltr_and_rtl_directions()
     test_bar_reader_tolerates_single_pixel_border_artifact()
     test_hard_lock_blocks_even_off_gcd_abilities()
@@ -769,4 +810,5 @@ if __name__ == "__main__":
     test_gcd_veil_timeout_flags_press_as_phantom()
     test_off_gcd_veil_is_independent_from_shared_gcd_veil()
     test_press_confirmation_abandoned_not_phantom_after_pause_gap()
+    test_debug_choice_reason_explains_why_the_winner_beat_the_runner_up()
     print("\nTous les tests passent.")

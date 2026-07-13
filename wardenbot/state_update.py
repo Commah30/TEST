@@ -151,7 +151,6 @@ ICON_VEIL_REL_THRESHOLD = 0.5
 
 @dataclass
 class TariqDetectionSnapshot:
-    chain_lightning_dim: bool = False
     culling_strike_dim: bool = False
     hammer_storm_cast_pct: float = 0.0
     hammer_storm_casting: bool = False
@@ -167,13 +166,22 @@ class TariqDetectionSnapshot:
 
 def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher, regions: dict):
     """
-    Le template "chain_lightning" capturé est l'icône GRISÉE (indisponible),
-    pas l'icône allumée (bleu clair, activée par thunder_call -- aucune
-    condition buff/flag ne modélise cette relation dans le YAML d'origine,
-    cf. discussion). On détecte donc l'état grisé et config/tariq.yaml
-    caste sur SON ABSENCE (not debuff:chain_lightning_dim), pas sa présence.
+    `capturer` accepté ici uniquement pour garder la même signature que
+    make_meiko_state_update_fn (build_engine appelle les deux de façon
+    générique, cf. main.py) -- PAS utilisé pour capturer quoi que ce soit :
+    le thread détection construit sa propre instance (cf.
+    _run_detection_worker/_detection_cycle plus bas), un mss.mss() n'étant
+    valide que sur le thread qui l'a créé.
 
-    Même schéma pour "culling_strike" : template capturé GRISÉ (cible au-dessus
+    chain_lightning : détection repassée en NORMALE (2026-07-14, choix de
+    l'utilisateur) -- ce n'est plus le worker qui matche son template ici. La
+    détection standard (is_ready_fn sur le thread de décision) matche l'icône
+    ALLUMÉE (disponible) directement, comme n'importe quelle ability du
+    projet. Le worker ne garde chain_lightning que pour le voile GCD
+    (luminosité de sa région, cf. GCD_ICON_REGIONS) -- plus de match de
+    template ni de debuff chain_lightning_dim. cf. config/tariq.yaml.
+
+    culling_strike, lui, garde la détection INVERSÉE : template capturé GRISÉ (cible au-dessus
     de 35% PV, indisponible -- confirmé par l'utilisateur), condition YAML sur SON
     ABSENCE (not debuff:culling_strike_dim). Vrai cooldown 4.44s en plus de
     cette condition (cf. config/tariq.yaml).
@@ -239,11 +247,12 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
     _capture_names = [
         "chain_lightning", "culling_strike", "hammer_storm_cast_bar",
         "tariq_buff_bar", "rage_bar", "hammer_storm_stack_badge",
-        # Icônes de la barre d'abilities (2026-07-14, voile GCD) -- chain_lightning
-        # et culling_strike sont déjà dans cette liste (utilisées pour le match
-        # "grisé"), les 7 autres s'ajoutent à la boîte englobante ici plutôt que
-        # de déclencher des grab() séparés (cf. le bug "5-6 grab() par tick"
-        # déjà corrigé plus haut dans ce fichier).
+        # Icônes de la barre d'abilities (2026-07-14, voile GCD) -- culling_strike
+        # est déjà dans cette liste pour le match "grisé", chain_lightning y reste
+        # désormais UNIQUEMENT pour le voile GCD (son match grisé a été retiré,
+        # détection repassée en normale, cf. plus haut), les autres s'ajoutent à
+        # la boîte englobante ici plutôt que de déclencher des grab() séparés
+        # (cf. le bug "5-6 grab() par tick" déjà corrigé plus haut dans ce fichier).
         "heavy_strike", "wild_swing", "face_breaker", "skull_crusher",
         "hammer_storm", "thunder_call", "focused_wrath",
     ]
@@ -285,12 +294,20 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
 
     snapshot_box = {"latest": TariqDetectionSnapshot()}
 
-    def _detection_cycle() -> None:
+    def _detection_cycle(capturer: ScreenCapture) -> None:
         """Un cycle complet de capture+matching+YOLO+OCR -- tourne dans le
         thread détection (cf. _run_detection_worker), jamais dans le thread
         principal. Construit une snapshot FRAÎCHE puis la publie d'un coup
         (affectation unique, atomique) -- ne jamais muter snapshot_box["latest"]
         en place.
+
+        `capturer` reçu en paramètre (PAS celui de make_tariq_state_update_fn,
+        volontairement ignoré ici) : un mss.mss() n'est valide que sur le
+        thread qui l'a créé (cf. wardenbot/capture.py) -- ce thread détection
+        doit utiliser SA PROPRE instance (cf. _run_detection_worker), jamais
+        celle construite par build_engine() sur un autre thread. Bug trouvé en
+        jeu (2026-07-15) : ScreenShotError('... BitBlt') levé en boucle quand
+        les deux threads se partageaient la même instance.
 
         Instrumenté étape par étape (2026-07-13, "transforme le watchdog en
         outil de diagnostic") : chaque étape (grab, chaque match template,
@@ -313,12 +330,13 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
         stages["grab_ms"] = _capture_dur * 1000
         snap = TariqDetectionSnapshot()
 
-        chain_lightning_region = regions.get("chain_lightning")
-        if chain_lightning_region is not None:
-            _t0 = time.monotonic()
-            frame = _crop(base_frame, chain_lightning_region)
-            snap.chain_lightning_dim = matcher.is_match(frame, "chain_lightning")
-            stages["chain_lightning_match_ms"] = (time.monotonic() - _t0) * 1000
+        # chain_lightning : plus de match du template ICI (2026-07-14) --
+        # détection repassée en NORMALE (cf. config/tariq.yaml), donc
+        # is_ready_fn (thread de décision) matche l'icône allumée directement,
+        # comme pour toute ability standard. Le worker ne s'en sert plus que
+        # pour le voile GCD (luminosité de la région, cf. GCD_ICON_REGIONS),
+        # pas pour un template. La région reste dans _capture_names pour ce
+        # voile.
 
         culling_strike_region = regions.get("culling_strike")
         if culling_strike_region is not None:
@@ -414,6 +432,10 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
             )
 
     def _run_detection_worker(stop_event: threading.Event) -> None:
+        # Instance dédiée à CE thread (cf. _detection_cycle ci-dessus) -- ne
+        # jamais réutiliser le `capturer` reçu par make_tariq_state_update_fn,
+        # construit sur un autre thread (build_engine).
+        worker_capturer = ScreenCapture()
         period = 1.0 / TARIQ_DETECTION_WORKER_HZ
         last_cycle_start = None
         while not stop_event.is_set():
@@ -454,7 +476,7 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
             # YOLO) doit juste être journalisé et retenté au prochain cycle,
             # pas tuer le thread.
             try:
-                _detection_cycle()
+                _detection_cycle(worker_capturer)
             except Exception as exc:
                 log_error("tariq _detection_cycle()", exc)
             # Le diagnostic détaillé "cycle complet" (étapes + CPU time + GPU)
@@ -479,7 +501,6 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
     # etc.) qu'un remplacement complet écraserait.
     def state_update_fn(state: State) -> None:
         snap = snapshot_box["latest"]
-        state.debuffs["chain_lightning_dim"] = snap.chain_lightning_dim
         state.debuffs["culling_strike_dim"] = snap.culling_strike_dim
         state.resources["hammer_storm_cast_pct"] = snap.hammer_storm_cast_pct
         state.flags["hammer_storm_casting"] = snap.hammer_storm_casting

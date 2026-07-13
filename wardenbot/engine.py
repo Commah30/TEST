@@ -13,6 +13,7 @@ pense que le hook fait ça".
 """
 from __future__ import annotations
 
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -50,6 +51,13 @@ class State:
     # dans l'ordre de priorité. Lu par make_debug_logger (main.py) UNIQUEMENT
     # quand pressed est None, pour ne pas bruiter le log le reste du temps.
     debug_skip_trace: list = field(default_factory=list)
+    # AUDIT 2026-07-14 : debug_skip_trace répond à "pourquoi PAS X" (seulement
+    # quand rien n'est pressé) mais rien ne répondait à "pourquoi X A gagné"
+    # quand une ability EST choisie -- trou d'observabilité identifié dans
+    # l'audit rotation/stabilité. Rempli par _pick_ability juste avant de
+    # retourner une ability retenue (écrasé, pas cumulé) ; lu par
+    # make_debug_logger (main.py) quand pressed n'est PAS None.
+    debug_choice_reason: str = ""
 
     def record_cast(self, name: str, now: float, cooldown_ms: int):
         self.last_cast = name
@@ -214,6 +222,30 @@ class RotationEngine:
         self.state_update_fn = state_update_fn
         self.off_gcd_hook_abilities = off_gcd_hook_abilities
 
+    def _safe_is_ready(self, *args) -> "tuple[bool, Optional[str]]":
+        """Appelle is_ready_fn en isolant ses exceptions. Retourne
+        (ready, err_msg) : si is_ready_fn LÈVE (typiquement une capture
+        d'écran transitoire qui hoquette -- ScreenShotError/BitBlt, bascule
+        plein écran du jeu...), on renvoie (False, message) pour que le scan
+        SAUTE cette ability et CONTINUE vers les priorités inférieures.
+
+        BUG TROUVÉ EN JEU (2026-07-14, analyse vidéo + logs Tariq) : sans ce
+        garde-fou, une exception dans is_ready_fn remontait à travers
+        _pick_ability et tuait TOUT le tick (rattrapée seulement tout en haut
+        par run_forever) -- donc dès que le scan atteignait face_breaker (la
+        SEULE ability Tariq sans skip_detection, donc la seule qui déclenche
+        une capture ici), un simple hoquet de capture empêchait wild_swing
+        (priorité inférieure) de jamais être évalué. Symptôme : la rotation
+        "gèle" plusieurs secondes une fois heavy_strike/procs indisponibles,
+        face_breaker ET wild_swing ne partent jamais. Une détection qui échoue
+        sur UNE ability ne doit dégrader QUE cette ability, pas figer toute la
+        rotation -- même principe que les autres garde-fous du projet
+        (run_forever, worker de détection)."""
+        try:
+            return bool(self.is_ready_fn(*args)), None
+        except Exception as exc:
+            return False, f"detection a levé {type(exc).__name__} -- ability sautée ce tick"
+
     def _pick_ability(self, now: float) -> Optional[Ability]:
         self.state.debug_skip_trace = []
         if now < self.state.hard_lock_until:
@@ -227,15 +259,39 @@ class RotationEngine:
             if self.state.is_on_cooldown(ab.name, now):
                 self.state.debug_skip_trace.append((ab.name, f"cooldown actif encore {self.state.cooldown_until.get(ab.name, 0.0) - now:.3f}s"))
                 continue
-            if ab.requires_ready and not self.is_ready_fn(ab.requires_ready):
-                self.state.debug_skip_trace.append((ab.name, f"requires_ready:{ab.requires_ready} pas pret"))
-                continue
+            if ab.requires_ready:
+                ready, err = self._safe_is_ready(ab.requires_ready)
+                if err is not None:
+                    self.state.debug_skip_trace.append((ab.name, err))
+                    continue
+                if not ready:
+                    self.state.debug_skip_trace.append((ab.name, f"requires_ready:{ab.requires_ready} pas pret"))
+                    continue
             if not evaluate_condition(ab.condition_for(self.state.mode), self.state):
                 self.state.debug_skip_trace.append((ab.name, f"condition fausse: {ab.condition_for(self.state.mode)!r}"))
                 continue
-            if not ab.skip_detection and not self.is_ready_fn(ab.template_name(), ab.confidence_threshold):
-                self.state.debug_skip_trace.append((ab.name, "template ne matche pas"))
-                continue
+            if not ab.skip_detection:
+                ready, err = self._safe_is_ready(ab.template_name(), ab.confidence_threshold)
+                if err is not None:
+                    self.state.debug_skip_trace.append((ab.name, err))
+                    continue
+                if not ready:
+                    self.state.debug_skip_trace.append((ab.name, "template ne matche pas"))
+                    continue
+            # AUDIT 2026-07-14 : les entrées déjà accumulées dans debug_skip_trace
+            # à ce stade sont TOUTES les abilities de priorité plus haute (donc
+            # évaluées avant celle-ci dans ce même scan) qui ont échoué --
+            # capturées ICI, avant de vider la trace, pour expliquer pourquoi
+            # `ab` a gagné plutôt qu'elles.
+            priority = ab.priority(self.state.mode)
+            if self.state.debug_skip_trace:
+                competitor_name, competitor_reason = self.state.debug_skip_trace[0]
+                self.state.debug_choice_reason = (
+                    f"priority={priority}, devançait {competitor_name} ({competitor_reason})"
+                    + (f" +{len(self.state.debug_skip_trace) - 1} autre(s)" if len(self.state.debug_skip_trace) > 1 else "")
+                )
+            else:
+                self.state.debug_choice_reason = f"priority={priority}, aucune ability plus prioritaire en lice"
             self.state.debug_skip_trace = []   # une ability a été retenue -- pas de trace à afficher
             return ab
         return None
@@ -277,6 +333,7 @@ class RotationEngine:
             # rapport au vrai jeu (cf. le bug "spam Wind Kick").
             self.press_fn(pressed)
             self.state.record_cast(pressed, now, 0)
+            self.state.debug_choice_reason = "décidé par pre_tick_hook (court-circuite le scan de priorité)"
             if pressed not in self.off_gcd_hook_abilities:
                 self.state.gcd_until = now + self.gcd_ms / 1000.0
 
@@ -291,6 +348,7 @@ class RotationEngine:
         on_tick: Optional[Callable[[Optional[str]], None]] = None,
         is_paused: Optional[Callable[[], bool]] = None,
         on_error: Optional[Callable[[BaseException], None]] = None,
+        stop_event: Optional[threading.Event] = None,
     ):
         """
         Boucle principale. tick_hz = fréquence d'évaluation (pas de press).
@@ -311,10 +369,18 @@ class RotationEngine:
         probablement transitoire (capture d'écran, inférence GPU). Si
         non fourni, imprime juste la trace (comportement visible en console,
         pas de crash silencieux).
+
+        stop_event (2026-07-15, cf. app.py::BotController -- GUI desktop) :
+        Event externe optionnel. S'il est fourni et déjà "set", la boucle
+        sort proprement à la fin de l'itération en cours -- seule alternative
+        à Ctrl+C (KeyboardInterrupt) pour un appelant qui pilote ce thread
+        depuis une UI (bouton Stop), où lever un KeyboardInterrupt inter-
+        thread n'est pas fiable. None (défaut) = comportement STRICTEMENT
+        inchangé pour main.py (qui ne passe jamais stop_event).
         """
         period = 1.0 / tick_hz
         try:
-            while True:
+            while stop_event is None or not stop_event.is_set():
                 start = time.monotonic()
                 if is_paused is not None and is_paused():
                     pressed = None

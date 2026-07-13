@@ -12,7 +12,7 @@ test -- seul PyYAML est requis, via wardenbot.engine).
 """
 from __future__ import annotations
 
-from wardenbot.engine import State
+from wardenbot.engine import Ability, RotationEngine, State
 from wardenbot.hooks import meiko_pre_tick, meiko_post_tick
 
 
@@ -200,6 +200,34 @@ def test_stack_timeout_forces_recalibration():
     print("Compteur à 3 depuis trop longtemps -> recalibré à 0 automatiquement.")
 
 
+def test_detection_exception_on_one_ability_does_not_freeze_the_scan():
+    """BUG TROUVÉ EN JEU (2026-07-14, analyse vidéo + logs Tariq) : une
+    exception dans is_ready_fn (capture d'écran qui hoquette -- BitBlt) pour
+    UNE ability à détection (ex: face_breaker, la seule sans skip_detection)
+    tuait tout le tick, empêchant les abilities de priorité INFÉRIEURE
+    (wild_swing) de jamais partir. Vérifie que le scan saute l'ability qui
+    lève et continue -- la rotation ne gèle plus sur un hoquet de capture."""
+    detector = Ability(name="detector", priority_st=1, skip_detection=False)   # déclenche is_ready_fn
+    filler = Ability(name="filler", priority_st=2, skip_detection=True)         # priorité inférieure, aucune détection
+
+    def is_ready_fn_that_throws(name, threshold=None):
+        raise RuntimeError("BitBlt (capture simulée qui hoquette)")
+
+    pressed_names: list[str] = []
+    engine = RotationEngine(
+        abilities=[detector, filler],
+        state=State(mode="st"),
+        press_fn=lambda name: pressed_names.append(name),
+        is_ready_fn=is_ready_fn_that_throws,
+    )
+    pressed = engine.tick()
+    assert pressed == "filler", (
+        f"le filler (priorité inférieure) doit partir malgré l'exception de détection sur 'detector', reçu {pressed!r}"
+    )
+    assert pressed_names == ["filler"]
+    print("Exception de détection sur une ability -> le scan continue, le filler part quand même.")
+
+
 if __name__ == "__main__":
     test_default_opens_when_buffs_missing()
     test_default_picks_whichever_buff_is_missing()
@@ -208,4 +236,5 @@ if __name__ == "__main__":
     test_stack_counter_tracks_real_spend_combos_not_visual_badge()
     test_visual_debuff_detection_is_ignored_for_stack_counting()
     test_stack_timeout_forces_recalibration()
+    test_detection_exception_on_one_ability_does_not_freeze_the_scan()
     print("\nTous les tests passent.")

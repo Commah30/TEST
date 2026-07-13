@@ -1,5 +1,19 @@
 # wardenbot
 
+> **⚠️ Important (FR)** — Pour le moment, le bot nécessite Windows configuré
+> à **100% DPI scaling**. Les scaling **125% et 150% ne sont pas supportés**
+> dans cette version : les coordonnées de capture/souris/InputWorker
+> peuvent être décalées. Nous recommandons fortement de rester en 100%
+> pendant l'utilisation. Le support complet 125%/150% arrivera plus tard,
+> une fois la base (config JSON + assistant de calibration) solide.
+>
+> **⚠️ Important (EN)** — For now, the bot requires Windows set to **100%
+> DPI scaling**. **125% and 150% scaling are not supported** in this
+> version: capture/mouse/InputWorker coordinates may be misaligned. We
+> strongly recommend staying at 100% while using the bot. Full 125%/150%
+> support will come later, once the foundation (JSON config + calibration
+> assistant) is solid.
+
 Moteur de rotation Python pour deux personnages sur **Fellowship** :
 **Meiko** (Warden, combo defensif) et **Tariq** (Spam V2, rotation en liste
 de priorité). Remplace des hooks de décision opaques par du code Python que

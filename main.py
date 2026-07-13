@@ -33,6 +33,18 @@ SETUP AVANT DE LANCER EN VRAI (dry_run=False) :
 """
 from __future__ import annotations
 
+# PHASE 3 industrialisation (2026-07-14) : déclare le process DPI-aware AVANT
+# TOUT AUTRE import/appel qui pourrait toucher à l'écran ou la souris (mss,
+# ctypes.windll.user32.GetCursorPos/GetForegroundWindow/GetAsyncKeyState...)
+# -- cf. wardenbot/dpi_awareness.py pour la cascade Per-Monitor V2 -> V1 ->
+# System Aware. Doit rester la toute première chose que fait ce module,
+# avant même le fix d'encodage UTF-8 juste en dessous : sans ça, Windows
+# recalcule (ment sur) les coordonnées écran dès que le scaling n'est pas à
+# 100%, et tout ce qui suit (capture, souris, presses) serait décalé.
+from wardenbot.dpi_awareness import enable_dpi_awareness
+
+DPI_AWARENESS_LEVEL = enable_dpi_awareness()
+
 import ctypes
 import sys
 import time
@@ -49,14 +61,27 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8")
 
 from wardenbot.capture import ScreenCapture
+from wardenbot.config_manager import ConfigManager, list_profiles, validate_profile
 from wardenbot.diagnostics import check_foreground_window, log_error
 from wardenbot.engine import RotationEngine, State, load_abilities
-from wardenbot.game_config import CHARACTERS, KEY_MAP, REGIONS
+from wardenbot.game_config import CHARACTERS
 from wardenbot.input_sim import InputSimulator, InputWorker
 from wardenbot.matcher import TemplateMatcher
 from wardenbot.state_update import TARIQ_BUFF_BAR_THRESHOLDS  # noqa: F401 -- re-exporté, cf. build_yolo_dataset.py
 
 DEBUG_LOG_PATH = Path("debug.log")
+
+# PHASE 1 industrialisation (2026-07-14) : REGIONS/KEY_MAP ne sont plus des
+# dicts codés en dur dans wardenbot/game_config.py -- ils viennent maintenant
+# de config/default.json via ConfigManager. Reconstruits ici, au chargement
+# du module, UNIQUEMENT pour la rétrocompatibilité de 4 scripts de dev qui
+# font `from main import REGIONS` (build_yolo_dataset.py, detect_check.py,
+# tick_timing_test.py, yolo_check.py) -- aucun changement requis dessus.
+# build_engine() ci-dessous n'utilise PAS ces globals : il crée son propre
+# ConfigManager et appelle get_region()/get_key() directement.
+_CONFIG_MANAGERS = {name: ConfigManager(name) for name in CHARACTERS}
+REGIONS = {name: cm.regions for name, cm in _CONFIG_MANAGERS.items()}
+KEY_MAP = {name: cm.keybinds for name, cm in _CONFIG_MANAGERS.items()}
 
 
 def make_debug_logger(state: State) -> Callable[[Optional[str]], None]:
@@ -110,13 +135,19 @@ def make_debug_logger(state: State) -> Callable[[Optional[str]], None]:
         # None -- cf. State.debug_skip_trace (engine.py), rempli par
         # _pick_ability : pourquoi CHAQUE ability a été écartée ce tick.
         skip_trace = state.debug_skip_trace if pressed is None else []
+        # choice_reason (2026-07-14, audit rotation/stabilité) : symétrique de
+        # skip_trace -- répond à "pourquoi X A gagné" quand pressed n'est PAS
+        # None, là où skip_trace répondait déjà à "pourquoi pas X" quand rien
+        # n'est pressé. cf. State.debug_choice_reason (engine.py), rempli par
+        # _pick_ability (ou le pre_tick_hook quand il court-circuite le scan).
+        choice_reason = state.debug_choice_reason if pressed is not None else ""
         line = (
             f"{time.strftime('%H:%M:%S')} "
             f"pressed={pressed!r} last_cast={state.last_cast!r} "
             f"buffs={snapshot['buffs']} debuffs={snapshot['debuffs']} "
             f"resources={snapshot['resources']} flags={snapshot['flags']} "
             f"locks={snapshot['locks']} cooldowns_remaining_s={snapshot['cooldowns_remaining_s']} "
-            f"skip_trace={skip_trace}\n"
+            f"skip_trace={skip_trace} choice_reason={choice_reason!r}\n"
         )
         with DEBUG_LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(line)
@@ -190,10 +221,26 @@ def make_pause_toggle(on_toggle: Optional[Callable[[bool], None]] = None) -> tup
     return is_paused, check_toggle_hotkey
 
 
-def build_engine(character: str, dry_run: bool = True) -> RotationEngine:
+def build_engine(character: str, dry_run: bool = True, profile: Optional[str] = None) -> RotationEngine:
     cfg = CHARACTERS[character]
-    key_map = KEY_MAP[character]
-    regions = REGIONS[character]
+    # PHASE 1 industrialisation (2026-07-14) : le moteur ne connaît plus les
+    # coordonnées -- il passe par ConfigManager.
+    # `.regions` reste un dict brut passé tel quel à state_update.py (qui
+    # fait plusieurs .get()/itérations dessus, cf. wardenbot/state_update.py)
+    # -- get_region()/get_key() servent aux lookups individuels ci-dessous.
+    # PHASE 2 (2026-07-14) : profile=None -> profil "Default" (cf.
+    # ConfigManager), comportement identique à avant l'introduction des
+    # profils -- rien ne change pour un appelant qui ne précise pas de profil.
+    config = ConfigManager(character, profile=profile)
+    # Validation stricte UNIQUEMENT en dehors du dry_run (2026-07-14, suite à
+    # la discussion) : en dry_run, aucune capture/presse réelle n'a lieu de
+    # toute façon (is_ready_fn retourne True inconditionnellement plus bas) --
+    # rester permissif garde le flux de dev existant (itérer sur la logique
+    # sans écran ni profil calibré) intact. En conditions réelles
+    # (dry_run=False), on préfère un échec explicite et immédiat à un bot qui
+    # tourne "à l'aveugle" sur un profil non calibré.
+    if not dry_run:
+        validate_profile(config, required_regions=cfg.get("required_regions"))
 
     abilities, meta = load_abilities(cfg["config"])
     state = State(mode=cfg["default_mode"])
@@ -224,7 +271,7 @@ def build_engine(character: str, dry_run: bool = True) -> RotationEngine:
     input_worker = InputWorker(input_sim, on_before_press=_check_focus_before_press)
 
     def press_fn(name: str) -> None:
-        key = key_map.get(name)
+        key = config.get_key(name)
         if key is None:
             print(f"[main] pas de touche mappée pour {name!r} -- ignoré")
             return
@@ -240,7 +287,7 @@ def build_engine(character: str, dry_run: bool = True) -> RotationEngine:
     def is_ready_fn(name: str, confidence_threshold: Optional[float] = None) -> bool:
         if dry_run:
             return True  # en dry-run on considère tout "ready" pour tester la logique
-        region = regions.get(name)
+        region = config.get_region(name)
         if region is None:
             return True  # pas de template pour cette entrée -> on ne bloque pas dessus
         frame = capturer.grab(region)
@@ -249,7 +296,7 @@ def build_engine(character: str, dry_run: bool = True) -> RotationEngine:
 
     make_state_update_fn = cfg["make_state_update_fn"]
     state_update_fn = (
-        make_state_update_fn(capturer, matcher, regions)
+        make_state_update_fn(capturer, matcher, config.regions)
         if (not dry_run and make_state_update_fn is not None)
         else None
     )
@@ -286,6 +333,29 @@ def choose_character() -> str:
         print(f"Choix invalide ({choice!r}) -- réessaie.")
 
 
+def choose_profile() -> Optional[str]:
+    """PHASE 2 (2026-07-14) : demande en console quel profil d'affichage
+    utiliser (résolution/DPI/échelle UI, cf. wardenbot/config_manager.py) --
+    miroir de choose_character() ci-dessus. Retourne None si un seul profil
+    existe (ou aucun) -- ConfigManager retombe alors sur "Default" tout
+    seul, pas la peine de demander pour rien."""
+    names = list_profiles()
+    if len(names) <= 1:
+        return None
+    print("[main] Profils disponibles :")
+    for i, name in enumerate(names, start=1):
+        print(f"  {i}. {name}")
+    while True:
+        choice = input("Choisis un profil (numéro ou nom, Entrée = Default) : ").strip()
+        if choice == "":
+            return None
+        if choice in names:
+            return choice
+        if choice.isdigit() and 1 <= int(choice) <= len(names):
+            return names[int(choice) - 1]
+        print(f"Choix invalide ({choice!r}) -- réessaie.")
+
+
 def make_error_handler() -> Callable[[BaseException], None]:
     """
     ROBUSTESSE (2026-07-12) : avant ça, une exception dans self.tick() (ex.
@@ -314,9 +384,12 @@ def _log_pause_event(paused: bool) -> None:
 
 
 if __name__ == "__main__":
+    print(f"[main] DPI awareness : {DPI_AWARENESS_LEVEL}")
     character = choose_character()
-    engine = build_engine(character, dry_run=False)  # mettre à True pour tester sans presser de touches
+    profile = choose_profile()
+    engine = build_engine(character, dry_run=False, profile=profile)  # mettre dry_run à True pour tester sans presser de touches
     print(f"[main] Personnage : {character}")
+    print(f"[main] Profil : {profile or 'Default'}")
     print(f"[main] debug -> {DEBUG_LOG_PATH.resolve()}")
     print("[main] C = pause/reprise rotation -- F9 = reset manuel warden_stacks")
 

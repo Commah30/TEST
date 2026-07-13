@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "resolution": "1920x1080",
+  "dpi_scale": 125,
+  "game_ui_scale": 1.0,
+  "calibrated": false,
+  "_comment": "PHASE 2 (2026-07-14) : profil créé pour la structure multi-résolution, PAS calibré -- aucune capture n'a jamais été faite sur cette résolution/ce DPI. regions volontairement vides plutôt que des coordonnées inventées (cf. contrainte 'ne jamais modifier un comportement sans preuve'). Utiliser l'assistant de calibration (Phase 4) avant de s'en servir en jeu -- en l'état, le bot tournerait 'à l'aveugle' (aucune détection d'icône/barre) sur ce profil.",
+  "characters": {
+    "meiko": {
+      "keybinds": {
+        "stone_shield": "5",
+        "shatter_earth": "6",
+        "earth_fist": "3",
+        "wind_kick": "2",
+        "spirit_palm": "1",
+        "earth_fist_2": "3",
+        "wind_kick_2": "2",
+        "spirit_palm_2": "1",
+        "fighting_techniques": "4",
+        "serenity": "7"
+      },
+      "regions": {}
+    },
+    "tariq": {
+      "keybinds": {
+        "heavy_strike": "1",
+        "wild_swing": "2",
+        "face_breaker": "3",
+        "skull_crusher": "4",
+        "hammer_storm_proc": "5",
+        "thunder_call": "6",
+        "chain_lightning": "7",
+        "culling_strike": "shift+3",
+        "focused_wrath": "q",
+        "skull_crusher_proc": "4"
+      },
+      "regions": {}
+    }
+  }
+}

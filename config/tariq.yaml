@@ -158,9 +158,19 @@ abilities:
   # sortir de la zone de bruit, coût minime (la Fury continue de monter,
   # retarde le cast d'une fraction de GCD tout au plus dans le pire cas).
   - name: hammer_storm_proc
-    priority_st: 2
-    priority_cleave: 2
-    priority_aoe: 2
+    # priority_st/cleave/aoe descendus de 2 à 4 (2026-07-15, demandé par
+    # l'utilisateur) : même principe déjà appliqué à skull_crusher_proc plus bas
+    # (descendue de 3 à 4 le 2026-07-12) -- heavy_strike (priority_st:3) doit
+    # gagner sans ambiguïté à chaque fois que son propre cooldown est fini,
+    # point clé de la rotation déjà établi. Sans off_gcd, hammer_storm_proc
+    # partage le même GCD que heavy_strike : en cas d'égalité de tick, le
+    # perdant attend au pire ~1 GCD (~1s, cf. gcd_ms plus haut), le flag
+    # hammer_storm_proc_ready ne s'efface jamais tout seul avec le temps
+    # (front montant, cf. hooks.py) -- donc aucun proc perdu, juste retardé
+    # d'un cran quand les deux tombent pile au même tick.
+    priority_st: 4
+    priority_cleave: 4
+    priority_aoe: 4
     cooldown_ms: 1   # demandé par l'utilisateur (2026-07-12) -- le vrai garde-fou anti-double-cast est le front montant + réarmement sur augmentation de stacks (hooks.py), pas ce cooldown ; un cooldown_ms plus élevé ne fait que retarder un proc légitime déjà validé (cf. 14:16:38/14:16:40 dans debug.log, 2 procs réels à 2s d'écart)
     is_proc: true
     skip_detection: true
@@ -242,22 +252,42 @@ abilities:
   # thunder_call, face_breaker n'est PAS off_gcd, donc le GCD normal (1s)
   # limitait déjà le spam en pratique -- mais 1ms restait faux et aurait pu
   # la faire spammer dès qu'un autre off_gcd libère un tick.
+  # skip_detection: true (2026-07-14) -- BUG TROUVÉ EN JEU (analyse vidéo +
+  # logs Tariq de la session 23:20-00:00) : face_breaker était la SEULE
+  # ability du kit encore SANS skip_detection, donc la seule à déclencher une
+  # capture d'écran (is_ready_fn -> template match) DANS le scan de priorité,
+  # à chaque tick où elle était atteinte. Deux conséquences, toutes deux
+  # observées : (1) sa détection template (icône, seuil 0.65) échouait
+  # souvent -> face_breaker ne partait presque jamais, exactement comme
+  # heavy_strike/skull_crusher/chain_lightning AVANT que le même fix leur soit
+  # appliqué ; (2) quand cette capture LEVAIT (ScreenShotError/BitBlt
+  # transitoire), l'exception remontait et tuait tout le tick -> wild_swing
+  # (priorité inférieure) ne partait jamais non plus, la rotation "gelait"
+  # plusieurs secondes une fois heavy_strike/procs indisponibles. Le garde-fou
+  # _safe_is_ready (engine.py) empêche désormais (2) de figer le scan, mais la
+  # vraie correction pour (1) est la même que pour tout le reste du kit : le
+  # cooldown réel (4.44s, confirmé par l'utilisateur) suffit comme garde-fou, la
+  # détection visuelle de l'icône est peu fiable et retarde des casts
+  # légitimes. Bonus FPS : plus aucune capture d'écran sur le thread de
+  # décision (le point soulevé par l'utilisateur), toute la détection lourde reste
+  # cantonnée au thread de détection dédié.
   - name: face_breaker
     priority_st: 6
     priority_cleave: 5
     priority_aoe: 5
     cooldown_ms: 4440
-    confidence_threshold: 0.65
+    skip_detection: true
 
-  # Détection INVERSÉE : le template "chain_lightning" capturé est l'icône
-  # GRISÉE (indisponible), pas l'icône allumée (bleu clair, activée par
-  # thunder_call -- aucune condition buff/flag ne modélise cette relation
-  # dans le YAML d'origine). skip_detection:true bypass donc le check normal
-  # "mon propre template doit matcher pour presser", et on caste sur
-  # L'ABSENCE du grisé (not debuff:chain_lightning_dim) plutôt que sur la
-  # présence d'un template allumé qu'on n'a pas. brightness_min retiré : on
-  # n'utilise plus la mesure de luminosité pour cette ability, cf. hooks.py
-  # tariq state_update_fn.
+  # DÉTECTION NORMALE (2026-07-14, choix de l'utilisateur) : chain_lightning revient
+  # à une détection standard -- elle matche sa PROPRE icône ALLUMÉE
+  # (disponible) et part sur SA PRÉSENCE, comme n'importe quelle ability du
+  # projet (skip_detection absent -> is_ready_fn vérifie le template). l'utilisateur
+  # recapture le template templates/tariq/chain_lightning.png sur l'icône
+  # ALLUMÉE (plus la grisée). L'ancienne détection INVERSÉE (template grisé +
+  # cast sur 'not debuff:chain_lightning_dim') est retirée -- ici ET dans
+  # wardenbot/state_update.py (plus de match du template grisé ni de pose du
+  # debuff chain_lightning_dim). La condition ne garde que le gate de Fury
+  # (not fury_above:85), inchangé.
   # cooldown_ms:6100 était une estimation -- vraie valeur confirmée par
   # l'utilisateur : 5.92s.
   - name: chain_lightning
@@ -265,8 +295,8 @@ abilities:
     priority_cleave: 3
     priority_aoe: 3
     cooldown_ms: 5920
-    skip_detection: true
-    condition: not fury_above:85, not debuff:chain_lightning_dim
+    confidence_threshold: 0.65
+    condition: not fury_above:85
 
   # Condition ajoutée (2026-07-12) : l'utilisateur veut wild_swing comme pur filler
   # -- utilisé seulement quand rien d'autre n'est disponible ET que la rage
