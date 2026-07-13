@@ -1,0 +1,11 @@
+# CODEOWNERS -- l'utilisateur (@Commah30) est propriétaire par défaut de TOUT le
+# dépôt. Effet une fois la protection de branche activée sur GitHub (Settings
+# -> Branches -> Require review from Code Owners) : l'utilisateur est
+# automatiquement ajouté comme reviewer OBLIGATOIRE de chaque Pull Request,
+# et aucune PR ne peut être fusionnée dans master sans son approbation.
+#
+# Le fichier seul ne bloque rien -- c'est la règle de branch protection qui
+# lui donne du pouvoir (cf. CONTRIBUTING.md). Ajouter une ligne plus
+# spécifique sous celle-ci si un jour un dossier doit avoir un owner
+# différent (la dernière règle qui matche gagne).
+* @Commah30
