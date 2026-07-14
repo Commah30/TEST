@@ -1,15 +1,26 @@
 """
 yolo_detect.py — inférence d'un modèle YOLO entraîné (ultralytics) sur une
 région d'écran, pour remplacer un groupe de template matches fragiles par un
-seul détecteur appris. Pilote : tariq_buff_bar (3 classes -- cf.
-build_yolo_dataset.py/train_yolo.py pour la génération du dataset et
-l'entraînement).
+seul détecteur appris. Deux modèles distincts, un par personnage : Tariq
+(tariq_buff_bar, 3 classes) et Meiko (buff_bar, 3 classes -- spirited_vortex/
+spirited_strikes/warden_of_the_temple_3, cf. build_yolo_dataset.py/
+train_yolo.py pour la génération du dataset et l'entraînement de chacun).
 
 Même principe que ocr.py : singleton paresseux (le chargement des poids est
 coûteux, jamais recréé par appel), toujours pure lecture d'écran, zéro
 lecture de mémoire du jeu.
 
-YOLO_WEIGHTS_PATH pointe vers le fichier de poids entraîné -- absent tant
+MULTI-MODÈLE (2026-07-16, généralisé pour Meiko) : `_models` est un cache
+PAR CHEMIN DE POIDS (dict), pas un singleton unique -- Tariq et Meiko ont
+chacun leur propre modèle entraîné (classes différentes), les deux peuvent
+coexister en mémoire sans se marcher dessus. `weights_path` par défaut sur
+TARIQ_YOLO_WEIGHTS_PATH partout (comportement STRICTEMENT inchangé pour tout
+le code existant qui appelle detect()/detect_with_boxes()/_get_model() sans
+argument -- calibration_engine.py, diagnostic_report.py, yolo_check.py,
+state_update.py côté Tariq). YOLO_WEIGHTS_PATH reste un alias de
+TARIQ_YOLO_WEIGHTS_PATH pour rétrocompatibilité.
+
+*_YOLO_WEIGHTS_PATH pointe vers le fichier de poids entraîné -- absent tant
 qu'aucun entraînement n'a été lancé (cf. train_yolo.py). detect() lève
 FileNotFoundError dans ce cas plutôt que de silencieusement ne rien
 détecter, pour ne pas masquer un déploiement incomplet.
@@ -32,23 +43,27 @@ try:
 except ImportError:
     torch = None
 
-YOLO_WEIGHTS_PATH = Path("runs/detect/train-5/weights/best.pt")   # 2026-07-13 : dataset élargi avec la session post-fix (skip_detection focused_wrath/thunder_call, seuil fury_above:30) -- 7358 images (5129 + 2229, dont 748 avec buff réel), 36 epochs (early stop, patience=20) -- P=0.992/R=0.997/mAP50=0.995 toutes classes confondues (hammer_storm_buff P=1.00/R=0.99, skull_crusher_buff P=0.987/R=1.00, focused_wrath_buff P=0.99/R=1.00). train-4 reste valide (5129 images, ancien dataset) si besoin de comparaison -- train/, train-2/, train-3/ obsolètes.
+TARIQ_YOLO_WEIGHTS_PATH = Path("runs/detect/train-5/weights/best.pt")   # 2026-07-13 : dataset élargi avec la session post-fix (skip_detection focused_wrath/thunder_call, seuil fury_above:30) -- 7358 images (5129 + 2229, dont 748 avec buff réel), 36 epochs (early stop, patience=20) -- P=0.992/R=0.997/mAP50=0.995 toutes classes confondues (hammer_storm_buff P=1.00/R=0.99, skull_crusher_buff P=0.987/R=1.00, focused_wrath_buff P=0.99/R=1.00). train-4 reste valide (5129 images, ancien dataset) si besoin de comparaison -- train/, train-2/, train-3/ obsolètes.
+MEIKO_YOLO_WEIGHTS_PATH = Path("runs/detect/train-6/weights/best.pt")   # 2026-07-15 : spirited_vortex/spirited_strikes/warden_of_the_temple_3, 428 images (1 clip dummy, nettoyées de 2 contaminations de fond -- braise + artefact début de combat, cf. build_yolo_dataset.py), 30 epochs (early stop) -- P>=0.994/R=1.0/mAP50=0.995 toutes classes. Un seul clip/contexte -- généralisation à un vrai combat pas encore validée (cf. discussion).
 
-_model = None  # singleton paresseux -- cf. docstring, chargement des poids coûteux
+YOLO_WEIGHTS_PATH = TARIQ_YOLO_WEIGHTS_PATH   # alias rétrocompatible -- ne pas retirer, cf. docstring
+
+_models: dict[str, "YOLO"] = {}  # un singleton par chemin de poids -- cf. docstring MULTI-MODÈLE
 
 
-def _get_model():
-    global _model
+def _get_model(weights_path: Path = TARIQ_YOLO_WEIGHTS_PATH):
+    global _models
     if YOLO is None:
         raise ImportError("ultralytics requis : pip install ultralytics")
-    if not YOLO_WEIGHTS_PATH.exists():
+    if not weights_path.exists():
         raise FileNotFoundError(
-            f"Poids introuvables : {YOLO_WEIGHTS_PATH} -- lance train_yolo.py d'abord, "
-            "ou ajuste YOLO_WEIGHTS_PATH si le run a produit un autre dossier (train2, train3...)."
+            f"Poids introuvables : {weights_path} -- lance train_yolo.py d'abord, "
+            "ou ajuste le chemin si le run a produit un autre dossier (train2, train3...)."
         )
-    if _model is None:
-        _model = YOLO(str(YOLO_WEIGHTS_PATH))
-    return _model
+    key = str(weights_path)
+    if key not in _models:
+        _models[key] = YOLO(key)
+    return _models[key]
 
 
 def _select_device() -> "int | str":
@@ -83,7 +98,7 @@ def _select_device() -> "int | str":
 _last_predict_speed_ms: dict[str, float] = {}
 
 
-def detect(frame: np.ndarray, conf: float = 0.4) -> dict[str, float]:
+def detect(frame: np.ndarray, conf: float = 0.4, weights_path: Path = TARIQ_YOLO_WEIGHTS_PATH) -> dict[str, float]:
     """Retourne {nom_de_classe: confiance} pour chaque détection au-dessus du
     seuil `conf`. Une classe absente du dict = non détectée. S'il y a
     plusieurs boîtes pour la même classe (ne devrait pas arriver ici, les 3
@@ -93,9 +108,12 @@ def detect(frame: np.ndarray, conf: float = 0.4) -> dict[str, float]:
     half=True (2026-07-13) : mesuré sur le modèle réel (train-4) --
     médiane 11.31ms (FP32) -> 10.95ms (FP16), ~11% de gain sur la seule
     inférence. Gratuit, pas de perte de précision observée sur ce modèle
-    3 classes (P/R inchangés sur le dataset de validation)."""
+    3 classes (P/R inchangés sur le dataset de validation).
+
+    weights_path (2026-07-16) : défaut Tariq pour ne rien changer aux
+    appelants existants -- passer MEIKO_YOLO_WEIGHTS_PATH pour Meiko."""
     global _last_predict_speed_ms
-    model = _get_model()
+    model = _get_model(weights_path)
     device = _select_device()
     results = model.predict(frame, conf=conf, device=device, half=(device != "cpu"), verbose=False)
     _last_predict_speed_ms = dict(results[0].speed) if results else {}
@@ -124,7 +142,9 @@ def get_last_predict_speed_ms() -> dict[str, float]:
     return dict(_last_predict_speed_ms)
 
 
-def detect_with_boxes(frame: np.ndarray, conf: float = 0.4) -> list[tuple[str, float, tuple[float, float, float, float]]]:
+def detect_with_boxes(
+    frame: np.ndarray, conf: float = 0.4, weights_path: Path = TARIQ_YOLO_WEIGHTS_PATH
+) -> list[tuple[str, float, tuple[float, float, float, float]]]:
     """Comme detect(), mais retourne aussi la position de chaque boîte
     (cx, cy, w, h normalisés 0-1, format YOLO) -- detect() les jette
     volontairement (le pipeline live n'a besoin que d'un booléen/confiance
@@ -134,8 +154,17 @@ def detect_with_boxes(frame: np.ndarray, conf: float = 0.4) -> list[tuple[str, f
     changement d'échelle de l'UI, cf. build_yolo_dataset.py --yolo-labels).
     Retourne une liste (pas un dict) : contrairement à detect(), on veut ICI
     toutes les boîtes, pas juste la meilleure par classe -- l'appelant filtre
-    lui-même si besoin."""
-    model = _get_model()
+    lui-même si besoin.
+
+    RÉUTILISÉ (2026-07-16) par make_meiko_state_update_fn (state_update.py)
+    pour localiser la boîte de spirited_strikes et y lire le compte à rebours
+    en OCR -- la barre de buffs étant dynamique (centrée, position variable
+    selon le nombre d'icônes actives), impossible de cibler une région fixe
+    pour l'OCR : seule la boîte YOLO donne la position réelle à cet instant.
+
+    weights_path (2026-07-16) : défaut Tariq pour ne rien changer aux
+    appelants existants -- passer MEIKO_YOLO_WEIGHTS_PATH pour Meiko."""
+    model = _get_model(weights_path)
     device = _select_device()
     results = model.predict(frame, conf=conf, device=device, verbose=False)
 

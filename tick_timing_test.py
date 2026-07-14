@@ -31,7 +31,7 @@ import time
 
 from wardenbot.capture import ScreenCapture
 from wardenbot.matcher import TemplateMatcher
-from wardenbot.engine import RotationEngine, State, load_abilities
+from wardenbot.engine import CombatState, RotationEngine, load_abilities
 from wardenbot.hooks import tariq_pre_tick, tariq_post_tick
 
 from main import CHARACTERS, REGIONS
@@ -44,7 +44,7 @@ def main():
     regions = REGIONS["tariq"]
 
     abilities, meta = load_abilities(cfg["config"])
-    state = State(mode=cfg["default_mode"])
+    state = CombatState(mode=cfg["default_mode"])
 
     matcher = TemplateMatcher(cfg["templates"])
     capturer = ScreenCapture()

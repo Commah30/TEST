@@ -100,26 +100,152 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from .engine import State
+from .engine import CombatState, Intent
 from wardenbot.diagnostics import log_press_confirmation
 
 FINISHER_DELAY_S = 0.15   # laisse au jeu le temps d'enregistrer la 2e pièce · EN: gives the game time to register the 2nd piece
 WARDEN_STACKS_TO_EMPOWER = 3
 WARDEN_STACK_TIMEOUT_S = 10.0
 
+# BUG TROUVÉ EN JEU (2026-07-17, rapport de session l'utilisateur) : "Rising Storm ->
+# Lashing Stormkick -> Rising Storm" (reset prématuré) au lieu de "Rising
+# Storm -> Lashing Stormkick -> Lashing Stormkick -> Rising Storm" -- la
+# condition d'origine ne dépensait Stormfall/Earthfall QUE quand les 2 orbes
+# étaient allumés (>= 0.999, cf. `if last == "wind_kick"/"earth_fist":`
+# ci-dessous) alors que Lashing Stormkick/Earthfist Barrage ne consomme
+# qu'UN SEUL orbe par cast (confirmé par la séquence attendue par l'utilisateur :
+# 2 Lashing Stormkick de suite avant de revenir à Rising Storm). Résultat :
+# dès qu'un orbe restait (stormfall=0.5 après une 1re dépense), la condition
+# `>= 0.999` redevenait fausse et le hook repartait sur "build" (Rising
+# Storm) au lieu de dépenser le 2e orbe -- gaspillant une charge déjà
+# disponible. Root cause identique à ce que l'audit d'architecture (Phase 0,
+# 2026-07-14) documentait déjà en théorie ("angle mort de fraîcheur") mais
+# ici c'est un bug de SEUIL, pas de latence : le code traitait Stormfall/
+# Earthfall comme un booléen (plein/vide) alors que c'est une vraie
+# ressource à 2 charges (cf. state_update.py, 0.0/0.5/1.0). Fix : dépenser
+# dès qu'AU MOINS un orbe est disponible (> 0), pas seulement les 2.
+# EN: BUG FOUND IN-GAME (2026-07-17, the user's session report): "Rising Storm
+# EN: -> Lashing Stormkick -> Rising Storm" (premature reset) instead of
+# EN: "Rising Storm -> Lashing Stormkick -> Lashing Stormkick -> Rising Storm"
+# EN: -- the original condition only spent Stormfall/Earthfall when BOTH orbs
+# EN: were lit (>= 0.999, cf. `if last == "wind_kick"/"earth_fist":` below)
+# EN: while Lashing Stormkick/Earthfist Barrage only consumes ONE orb per cast
+# EN: (confirmed by the sequence the user expects: 2 Lashing Stormkick in a row
+# EN: before returning to Rising Storm). Result: as soon as one orb remained
+# EN: (stormfall=0.5 after a first spend), the `>= 0.999` condition became
+# EN: false again and the hook went back to "build" (Rising Storm) instead of
+# EN: spending the 2nd orb -- wasting an already-available charge. Same root
+# EN: cause the architecture audit (Phase 0, 2026-07-14) already documented in
+# EN: theory ("freshness blind spot") but here it's a THRESHOLD bug, not
+# EN: latency: the code treated Stormfall/Earthfall as a boolean (full/empty)
+# EN: when it's a real 2-charge resource (cf. state_update.py, 0.0/0.5/1.0).
+# EN: Fix: spend as soon as AT LEAST one orb is available (> 0), not only both.
+STORM_EARTH_SPEND_THRESHOLD = 0.0
 
-def _set_warden_stacks(state: State, now: float, value: int) -> None:
+# DEMANDE DE L'UTILISATEUR (2026-07-16) : Spirited Strikes dure 30s -- au lieu
+# d'attendre qu'il tombe à False (ce qui, combiné au bug de détection ci-
+# dessous, causait un spam du combo défensif), on le refresh PROACTIVEMENT
+# quand il reste ≤N secondes, en lisant le VRAI compte à rebours affiché sur
+# l'icône (OCR, cf. wardenbot/state_update.py::MeikoDetectionSnapshot --
+# jamais une estimation dérivée d'un timer local, cf. principe du projet).
+# Spirited Vortex, lui, ne suit PAS cette règle : son SEUL déclencheur de
+# refresh reste la règle des 3 stacks de Warden of the Temple (demande
+# explicite de l'utilisateur) -- jamais basé sur sa propre durée restante.
+#
+# 5s -> 10s (2026-07-18, rapport l'utilisateur : "perd trop d'uptime sur Spirited
+# Strikes") : 5s ne laissait quasiment aucune marge. Le refresh n'est
+# proposé qu'au prochain passage par "rien en cours" (entre deux cycles du
+# combo Storm/Earth en cours) -- dans le pire cas, ça peut attendre la fin
+# du cycle en cours (~2.35s : GCD+GCD+FINISHER_DELAY_S) AVANT même de
+# commencer le combo de refresh (encore ~2.35s). Pire cas total ~4.7s rien
+# que pour le temps de jeu, avant même de compter la latence de détection
+# (OCR throttlé ~400ms, cf. MEIKO_OCR_INTERVAL_S). Avec un seuil à 5s, la
+# marge réelle avoisinait 0.3s -- assez pour que le buff tombe avant que le
+# refresh n'aboutisse, perdant l'uptime que ce mécanisme est censé
+# préserver. 10s laisse ~5.3s de marge, largement au-dessus du pire cas.
+# EN: THE USER'S REQUEST (2026-07-16): Spirited Strikes lasts 30s -- instead of
+# EN: waiting for it to drop to False (which, combined with the detection bug
+# EN: below, caused the defensive combo to spam), it's refreshed PROACTIVELY
+# EN: when ≤N seconds remain, by reading the REAL countdown displayed on the
+# EN: icon (OCR, cf. wardenbot/state_update.py::MeikoDetectionSnapshot --
+# EN: never an estimate derived from a local timer, cf. project principle).
+# EN: Spirited Vortex does NOT follow this rule: its ONLY refresh trigger
+# EN: stays the Warden of the Temple 3-stack rule (the user's explicit
+# EN: request) -- never based on its own remaining duration.
+# EN:
+# EN: 5s -> 10s (2026-07-18, the user's report: "losing too much uptime on
+# EN: Spirited Strikes"): 5s left almost no margin. The refresh is only
+# EN: proposed on the next pass through "nothing in progress" (between two
+# EN: cycles of the ongoing Storm/Earth combo) -- worst case, it can wait for
+# EN: the current cycle to finish (~2.35s: GCD+GCD+FINISHER_DELAY_S) BEFORE
+# EN: even starting the refresh combo (another ~2.35s). Total worst case
+# EN: ~4.7s of pure game time, before even counting detection latency (OCR
+# EN: throttled ~400ms, cf. MEIKO_OCR_INTERVAL_S). With a 5s threshold, the
+# EN: real margin was around 0.3s -- enough for the buff to drop before the
+# EN: refresh landed, losing the very uptime this mechanism is meant to
+# EN: preserve. 10s leaves ~5.3s of margin, comfortably above the worst case.
+STRIKES_PROACTIVE_REFRESH_WINDOW_S = 10.0
+
+# BUG TROUVÉ EN JEU (2026-07-16, log Meiko analysé avec l'utilisateur) : "rien n'est
+# lancé comme il devrait à part les premiers combo" -- deux symptômes, même
+# root cause. (1) Vortex castée 2 fois de suite puis Strikes 3 fois de suite
+# avant que la boucle Storm/Earth démarre enfin : capture_watchdog.log
+# confirme deux cycles du thread de détection Meiko à 2.551s et 3.490s
+# (seuil 0.2s, contention GPU -- même phénomène déjà documenté côté Tariq,
+# cf. yolo_detect.py::_select_device) pile aux mêmes instants. state.buffs
+# restait donc figé sur la valeur PRÉ-cast pendant tout le hoquet, et le hook
+# recastait une ability qui venait littéralement d'être posée. (2) Une fois
+# primé, le refresh proactif de Strikes tournait en boucle PENDANT PLUS DE
+# 25 SECONDES d'affilée (spirited_strikes_remaining_s bloqué à exactement
+# 5.0 tick après tick) -- le hook re-déclenchait un refresh avant même que
+# la lecture OCR ait eu le temps de refléter le cast qu'on venait de faire.
+#
+# Fix : même principe que _hammer_storm_proc_pending côté Tariq (cf. plus
+# bas dans ce fichier) -- après avoir décidé un cast, on marque une fenêtre
+# de confirmation pendant laquelle on NE RE-DÉCLENCHE PAS le même motif,
+# qu'on soit encore en train d'attendre que la détection rattrape un hoquet,
+# ou que le cast précédent ait simplement échoué en jeu. 6s de marge :
+# largement au-dessus d'un combo complet (~2.35s, GCD+GCD+FINISHER_DELAY)
+# ET du pire hoquet observé (3.49s) -- si RIEN ne s'est confirmé après ça,
+# on considère que le cast précédent a réellement échoué et on retente.
+# EN: BUG FOUND IN-GAME (2026-07-16, Meiko log analyzed with the user): "nothing
+# EN: fires as it should except the first combos" -- two symptoms, same root
+# EN: cause. (1) Vortex cast twice in a row then Strikes three times in a row
+# EN: before the Storm/Earth loop finally started: capture_watchdog.log
+# EN: confirms two Meiko detection thread cycles at 2.551s and 3.490s
+# EN: (threshold 0.2s, GPU contention -- same phenomenon already documented on
+# EN: the Tariq side, cf. yolo_detect.py::_select_device) at those exact
+# EN: moments. state.buffs thus stayed frozen on the PRE-cast value for the
+# EN: whole hiccup, and the hook recast an ability that had literally just
+# EN: been applied. (2) Once primed, the Strikes proactive refresh looped for
+# EN: MORE THAN 25 SECONDS straight (spirited_strikes_remaining_s stuck at
+# EN: exactly 5.0 tick after tick) -- the hook kept re-triggering a refresh
+# EN: before the OCR reading even had time to reflect the cast we had just
+# EN: made.
+# EN:
+# EN: Fix: same principle as _hammer_storm_proc_pending on the Tariq side (cf.
+# EN: below in this file) -- after deciding a cast, we mark a confirmation
+# EN: window during which we do NOT re-trigger the same reason, whether we're
+# EN: still waiting for detection to catch up on a hiccup, or the previous
+# EN: cast genuinely failed in-game. 6s margin: comfortably above a full combo
+# EN: (~2.35s, GCD+GCD+FINISHER_DELAY) AND the worst hiccup observed (3.49s)
+# EN: -- if NOTHING has been confirmed after that, we assume the previous cast
+# EN: really failed and retry.
+MEIKO_DEFENSE_CONFIRM_WINDOW_S = 6.0
+
+
+def _set_warden_stacks(state: CombatState, now: float, value: int) -> None:
     value = max(0, min(value, WARDEN_STACKS_TO_EMPOWER))
-    was_empowered = state.flags.get("warden_stacks", 0) >= WARDEN_STACKS_TO_EMPOWER
-    state.flags["warden_stacks"] = value
+    was_empowered = state.hooks.get("warden_stacks", 0) >= WARDEN_STACKS_TO_EMPOWER
+    state.hooks["warden_stacks"] = value
     is_empowered = value >= WARDEN_STACKS_TO_EMPOWER
     if is_empowered and not was_empowered:
-        state.flags["warden_stacks_since"] = now
+        state.hooks["warden_stacks_since"] = now
     elif not is_empowered:
-        state.flags.pop("warden_stacks_since", None)
+        state.hooks.pop("warden_stacks_since", None)
 
 
-def _reconcile_warden_stacks(state: State, now: float) -> None:
+def _reconcile_warden_stacks(state: CombatState, now: float) -> None:
     """
     Filet de sécurité anti-désynchro -- cf. docstring du module.
 
@@ -138,12 +264,39 @@ def _reconcile_warden_stacks(state: State, now: float) -> None:
     EN: we had just fixed. Only the timeout now protects against a desync
     EN: (+ manual F9 reset).
     """
-    since = state.flags.get("warden_stacks_since")
+    since = state.hooks.get("warden_stacks_since")
     if since is not None and now - since > WARDEN_STACK_TIMEOUT_S:
         _set_warden_stacks(state, now, 0)
 
 
-def meiko_pre_tick(state: State) -> Optional[str]:
+def meiko_pre_tick(state: CombatState) -> list[Intent]:
+    """
+    Câblé comme pre_tick_hook (cf. RotationEngine, engine.py::Intent) -- doit
+    retourner une liste d'Intent, pas un nom nu. Toute la logique de décision
+    (combo en cours, quelle 2e pièce, refresh du combo défensif...) reste
+    intacte dans _meiko_choose_combo_step ci-dessous, un simple
+    Optional[str] en interne -- bien plus simple à lire/déboguer que si
+    chacun de ses ~14 points de retour manipulait Intent directement. Poids
+    fixe de 90 (cf. Intent dans engine.py) : reproduit fidèlement l'ancien
+    comportement de "GOTO absolu" (ce nom gagnait TOUJOURS contre le scan de
+    priorité YAML, poids 50) -- migration mécanique, zéro changement de
+    comportement.
+
+    EN: Wired as pre_tick_hook (cf. RotationEngine, engine.py::Intent) -- must
+    EN: return a list of Intent, not a bare name. All the decision logic
+    EN: (in-progress combo, which 2nd piece, defensive combo refresh...) stays
+    EN: intact in _meiko_choose_combo_step below, a plain Optional[str]
+    EN: internally -- far simpler to read/debug than if each of its ~14
+    EN: return points manipulated Intent directly. Fixed weight of 90 (cf.
+    EN: Intent in engine.py): faithfully reproduces the former "absolute GOTO"
+    EN: behavior (this name ALWAYS won against the YAML priority scan, weight
+    EN: 50) -- mechanical migration, zero behavior change.
+    """
+    ability = _meiko_choose_combo_step(state)
+    return [Intent(ability=ability, weight=90, source="meiko_pre_tick")] if ability else []
+
+
+def _meiko_choose_combo_step(state: CombatState) -> Optional[str]:
     """
     Complète un combo en cours. Si le dernier cast est la 1re pièce d'un
     combo, retourne le nom de la 2e pièce à presser CE tick (bypass le scan
@@ -179,9 +332,9 @@ def meiko_pre_tick(state: State) -> Optional[str]:
     if last in ("wind_kick_2", "earth_fist_2", "spirit_palm_2"):
         if now - state.last_cast_time < FINISHER_DELAY_S:
             return None
-        combo = state.flags.pop("_pending_stack_combo", None)
+        combo = state.hooks.pop("_pending_stack_combo", None)
         if combo == "grant":
-            _set_warden_stacks(state, now, state.flags.get("warden_stacks", 0) + 1)
+            _set_warden_stacks(state, now, state.hooks.get("warden_stacks", 0) + 1)
         elif combo == "reset":
             _set_warden_stacks(state, now, 0)
         return "fighting_techniques"
@@ -196,19 +349,19 @@ def meiko_pre_tick(state: State) -> Optional[str]:
     # --- Storm (Wind Kick 1re pièce) : build ou spend selon la charge Stormfall ---
     # EN: --- Storm (Wind Kick 1st piece): build or spend depending on the Stormfall charge ---
     if last == "wind_kick":
-        if state.resources.get("stormfall", 0.0) >= 0.999:
-            state.flags["_pending_stack_combo"] = "grant"   # Lashing Stormkick -> +1 stack
+        if state.resources.get("stormfall", 0.0) > STORM_EARTH_SPEND_THRESHOLD:
+            state.hooks["_pending_stack_combo"] = "grant"   # Lashing Stormkick -> +1 stack
             return "earth_fist_2"
-        state.flags.pop("_pending_stack_combo", None)
+        state.hooks.pop("_pending_stack_combo", None)
         return "spirit_palm_2"        # build -> Rising Storm
 
     # --- Earth (Earth Fist 1re pièce) : build ou spend selon la charge Earthfall ---
     # EN: --- Earth (Earth Fist 1st piece): build or spend depending on the Earthfall charge ---
     if last == "earth_fist":
-        if state.resources.get("earthfall", 0.0) >= 0.999:
-            state.flags["_pending_stack_combo"] = "grant"   # Earthfist Barrage -> +1 stack
+        if state.resources.get("earthfall", 0.0) > STORM_EARTH_SPEND_THRESHOLD:
+            state.hooks["_pending_stack_combo"] = "grant"   # Earthfist Barrage -> +1 stack
             return "wind_kick_2"
-        state.flags.pop("_pending_stack_combo", None)
+        state.hooks.pop("_pending_stack_combo", None)
         return "spirit_palm_2"        # build -> Rising Earth
 
     # --- Defensive (Spirit Palm 1re pièce) : LA décision qu'on ne pouvait
@@ -220,57 +373,270 @@ def meiko_pre_tick(state: State) -> Optional[str]:
         vortex_up = state.buffs.get("spirited_vortex", False)
         strikes_up = state.buffs.get("spirited_strikes", False)
 
-        if state.flags.get("warden_stacks", 0) >= WARDEN_STACKS_TO_EMPOWER:
+        if state.hooks.get("warden_stacks", 0) >= WARDEN_STACKS_TO_EMPOWER:
             # 3 stacks confirmés -> Spirited Vortex à coup sûr, peu importe
             # l'état de Strikes. C'est la règle que tu voulais imposer. Ce
             # cast-là (et LUI SEUL) consomme les 3 stacks.
             # EN: 3 stacks confirmed -> Spirited Vortex for sure, regardless of
             # EN: the Strikes state. This is the rule you wanted to enforce.
             # EN: That cast (and IT ALONE) consumes the 3 stacks.
-            state.flags["_pending_stack_combo"] = "reset"
+            #
+            # BUG TROUVÉ EN JEU (2026-07-16, rapporté par l'utilisateur) : "la
+            # rotation spam Vortex/Strikes" -- après CE cast forcé, on
+            # dé-prime volontairement (meiko_defense_primed=False) pour
+            # laisser "rien en cours" re-vérifier UNE fois Strikes (souvent
+            # retombé pendant les 3 cycles Storm/Earth) avant de retourner à
+            # la boucle -- exactement la séquence que l'utilisateur a décrite
+            # (Vortex forcé PUIS refresh Strikes PUIS repart sur la
+            # rotation). cf. meiko_defense_primed plus bas pour le
+            # mécanisme complet.
+            # EN: BUG FOUND IN-GAME (2026-07-16, reported by the user): "the
+            # EN: rotation spams Vortex/Strikes" -- after THIS forced cast, we
+            # EN: deliberately un-prime (meiko_defense_primed=False) so "rien
+            # EN: en cours" re-checks Strikes once (often dropped during the 3
+            # EN: Storm/Earth cycles) before returning to the loop -- exactly
+            # EN: the sequence the user described (forced Vortex THEN Strikes
+            # EN: refresh THEN back to rotation). cf. meiko_defense_primed
+            # EN: below for the full mechanism.
+            state.hooks["_pending_stack_combo"] = "reset"
+            state.hooks["meiko_defense_primed"] = False
             return "earth_fist_2"
 
-        if not vortex_up:
+        if state.hooks.get("meiko_defense_primed", False):
+            # DEMANDE DE L'UTILISATEUR (2026-07-16) : une fois primé, Vortex ne doit
+            # PLUS JAMAIS être re-casté ici -- son seul déclencheur est la
+            # règle des 3 stacks ci-dessus (déjà traitée, on ne peut plus y
+            # être arrivé si on est ici). Le seul autre motif d'ouverture une
+            # fois primé est le refresh (pro)actif de Strikes (cf. "rien en
+            # cours" plus bas) -- on ignore délibérément vortex_up pour ne
+            # pas dépendre d'un flicker de détection ponctuel.
+            # EN: THE USER'S REQUEST (2026-07-16): once primed, Vortex must NEVER
+            # EN: be re-cast here -- its only trigger is the 3-stack rule above
+            # EN: (already handled, we can't have gotten here if that fired).
+            # EN: The only other reason to open once primed is the
+            # EN: (pro)active Strikes refresh (cf. "rien en cours" below) -- we
+            # EN: deliberately ignore vortex_up so as not to depend on a
+            # EN: one-off detection flicker.
+            state.hooks.pop("_pending_stack_combo", None)
+            return "wind_kick_2"
+
+        # Phase d'ouverture initiale (pas encore primé) : Vortex en premier
+        # si manquant, comme avant ce fix -- MAIS avec une fenêtre de
+        # confirmation (cf. MEIKO_DEFENSE_CONFIRM_WINDOW_S) : si on vient
+        # JUSTE de tenter ce cast, on ne le retente pas juste parce que la
+        # détection n'a pas encore rattrapé un hoquet -- on considère qu'il a
+        # peut-être déjà réussi, et on laisse la fenêtre s'écouler avant de
+        # décider que ça a réellement échoué.
+        # EN: Initial opening phase (not yet primed): Vortex first if missing,
+        # EN: same as before this fix -- BUT with a confirmation window (cf.
+        # EN: MEIKO_DEFENSE_CONFIRM_WINDOW_S): if we JUST attempted this cast,
+        # EN: we don't retry it just because detection hasn't caught up on a
+        # EN: hiccup yet -- we assume it may have already succeeded, and let
+        # EN: the window elapse before deciding it genuinely failed.
+        vortex_pending_since = state.hooks.get("_vortex_open_pending_since")
+        vortex_recently_attempted = (
+            vortex_pending_since is not None and now - vortex_pending_since < MEIKO_DEFENSE_CONFIRM_WINDOW_S
+        )
+        if not vortex_up and not vortex_recently_attempted:
             # Vortex casté hors 3-stacks -> les stacks en cours ne sont PAS
             # consommées (seul un Vortex à 3 stacks les consomme).
             # EN: Vortex cast outside 3-stacks -> the current stacks are NOT
             # EN: consumed (only a Vortex at 3 stacks consumes them).
-            state.flags.pop("_pending_stack_combo", None)
+            state.hooks["_vortex_open_pending_since"] = now
+            state.hooks.pop("_pending_stack_combo", None)
             return "earth_fist_2"     # Vortex manquant -> priorité · EN: Vortex missing -> priority
-        if not strikes_up:
-            state.flags.pop("_pending_stack_combo", None)
+
+        strikes_pending_since = state.hooks.get("_strikes_open_pending_since")
+        strikes_recently_attempted = (
+            strikes_pending_since is not None and now - strikes_pending_since < MEIKO_DEFENSE_CONFIRM_WINDOW_S
+        )
+        if not strikes_up and not strikes_recently_attempted:
+            state.hooks["_strikes_open_pending_since"] = now
+            state.hooks.pop("_pending_stack_combo", None)
             return "wind_kick_2"      # sinon Strikes manquant -> le prendre · EN: else Strikes missing -> take it
-        # Les deux sont déjà up (cas limite, ne devrait pas arriver souvent
-        # puisqu'on n'ouvre ce combo QUE quand l'un des deux manque, cf. plus
-        # bas) -> défaut sûr sur Strikes plutôt que de ne rien retourner.
-        # EN: Both are already up (edge case, shouldn't happen often since we
-        # EN: only open this combo WHEN one of the two is missing, cf. below)
-        # EN: -> safe default on Strikes rather than returning nothing.
-        state.flags.pop("_pending_stack_combo", None)
+        # Les deux sont déjà up, ou en attente de confirmation (cas limite,
+        # ne devrait pas arriver souvent puisqu'on n'ouvre ce combo QUE quand
+        # l'un des deux manque, cf. plus bas) -> défaut sûr sur Strikes
+        # plutôt que de ne rien retourner.
+        # EN: Both are already up, or awaiting confirmation (edge case,
+        # EN: shouldn't happen often since we only open this combo WHEN one of
+        # EN: the two is missing, cf. below) -> safe default on Strikes rather
+        # EN: than returning nothing.
+        state.hooks.pop("_pending_stack_combo", None)
         return "wind_kick_2"
 
     # --- Rien en cours : faut-il OUVRIR le combo défensif maintenant ? ---
-    # On n'ouvre QUE si un vrai manque est détecté (buff absent) ou si les 3
-    # stacks sont atteintes -- plus de minuteur estimé qui peut rester
-    # bloqué près de 0 et forcer une boucle défensive infinie.
+    # BUG TROUVÉ EN JEU (2026-07-16, rapporté par l'utilisateur) : "la rotation ne
+    # fait que spam le combo Spirited Vortex/Strikes" -- avant ce fix,
+    # needs_refresh redevenait vrai dès qu'UN SEUL des deux buffs retombait,
+    # même en PLEIN MILIEU de la boucle Storm/Earth (Wind Kick/Earth Fist) --
+    # si Vortex/Strikes durent moins longtemps qu'un cycle complet de 3
+    # Lashing Stormkick, ce qui semble être le cas, le combo défensif
+    # reprenait la main à CHAQUE fois, et la boucle Storm/Earth n'avait
+    # jamais l'occasion de tourner plus d'un cycle -- exactement le spam
+    # observé. Séquence attendue par l'utilisateur : ouvrir Vortex puis Strikes une
+    # FOIS en début de combat, PUIS laisser la boucle Storm/Earth tourner
+    # sans interruption jusqu'à 3 stacks (même si Vortex/Strikes retombent
+    # entre-temps), forcer Vortex à 3 stacks, refresh Strikes si besoin à CE
+    # moment précis, puis reprendre la boucle -- cycle qui se répète.
+    #
+    # meiko_defense_primed (flag) : True une fois que les deux buffs ont été
+    # confirmés up au moins une fois -- tant qu'il est True, une chute
+    # ponctuelle de Vortex/Strikes en pleine boucle Storm/Earth n'interrompt
+    # PLUS rien (on laisse `return None` -> le scan de priorité normal
+    # reprend earth_fist, l'ouvreur ST). Remis à False à deux moments
+    # seulement : (1) au tout début du combat (valeur par défaut), pour
+    # forcer le double-refresh initial ; (2) juste après le Vortex forcé à 3
+    # stacks (cf. plus haut), pour laisser UNE relecture de Strikes avant de
+    # re-primer et replonger dans la boucle. warden_stacks>=3 reste un
+    # déclencheur ABSOLU, primed ou non -- jamais retardé.
     # EN: --- Nothing in progress: should we OPEN the defensive combo now? ---
-    # EN: We only open if a real gap is detected (buff absent) or if the 3
-    # EN: stacks are reached -- no more estimated timer that can stay stuck near
-    # EN: 0 and force an infinite defensive loop.
+    # EN: BUG FOUND IN-GAME (2026-07-16, reported by the user): "the rotation
+    # EN: just spams the Spirited Vortex/Strikes combo" -- before this fix,
+    # EN: needs_refresh went true again as soon as EITHER buff dropped, even
+    # EN: RIGHT IN THE MIDDLE of the Storm/Earth loop (Wind Kick/Earth Fist) --
+    # EN: if Vortex/Strikes last less than a full 3-Lashing-Stormkick cycle,
+    # EN: which seems to be the case, the defensive combo took back control
+    # EN: EVERY time, and the Storm/Earth loop never got to run more than one
+    # EN: cycle -- exactly the observed spam. Sequence the user expects: open
+    # EN: Vortex then Strikes ONCE at the start of the fight, THEN let the
+    # EN: Storm/Earth loop run uninterrupted until 3 stacks (even if
+    # EN: Vortex/Strikes drop in between), force Vortex at 3 stacks, refresh
+    # EN: Strikes if needed at THAT exact moment, then resume the loop --
+    # EN: cycle repeats.
+    # EN:
+    # EN: meiko_defense_primed (flag): True once both buffs have been
+    # EN: confirmed up at least once -- while True, a one-off drop of
+    # EN: Vortex/Strikes mid-Storm/Earth-loop no longer interrupts anything
+    # EN: (we `return None` -> the normal priority scan resumes earth_fist,
+    # EN: the ST opener). Reset to False at only two moments: (1) the very
+    # EN: start of the fight (default value), to force the initial double
+    # EN: refresh; (2) right after the forced Vortex at 3 stacks (cf. above),
+    # EN: to allow ONE re-check of Strikes before re-priming and diving back
+    # EN: into the loop. warden_stacks>=3 stays an ABSOLUTE trigger, primed or
+    # EN: not -- never delayed.
     vortex_up = state.buffs.get("spirited_vortex", False)
     strikes_up = state.buffs.get("spirited_strikes", False)
-    needs_refresh = (
-        state.flags.get("warden_stacks", 0) >= WARDEN_STACKS_TO_EMPOWER
-        or not vortex_up
-        or not strikes_up
+    stacks_maxed = state.hooks.get("warden_stacks", 0) >= WARDEN_STACKS_TO_EMPOWER
+    primed = state.hooks.get("meiko_defense_primed", False)
+
+    # DEMANDE DE L'UTILISATEUR (2026-07-16) : une fois primé, Strikes se refresh
+    # PROACTIVEMENT quand il reste ≤STRIKES_PROACTIVE_REFRESH_WINDOW_S
+    # (lecture OCR réelle, cf. wardenbot/state_update.py) -- PAS quand il
+    # tombe à False. `> 0` exclut une lecture 0.0/négative aberrante (buff
+    # déjà retombé entre le dernier cycle OCR et maintenant -- dans ce cas
+    # spirited_strikes lui-même serait déjà False, géré par la phase
+    # d'ouverture initiale si jamais primed retombait aussi à False).
+    # EN: THE USER'S REQUEST (2026-07-16): once primed, Strikes is refreshed
+    # EN: PROACTIVELY when ≤STRIKES_PROACTIVE_REFRESH_WINDOW_S remain (real OCR
+    # EN: reading, cf. wardenbot/state_update.py) -- NOT when it drops to
+    # EN: False. `> 0` excludes a stray 0.0/negative read (buff already dropped
+    # EN: between the last OCR cycle and now -- in that case spirited_strikes
+    # EN: itself would already be False, handled by the initial opening phase
+    # EN: if primed also happened to drop back to False).
+    # Fenêtre de confirmation (cf. MEIKO_DEFENSE_CONFIRM_WINDOW_S plus haut) :
+    # si on a déjà déclenché un refresh proactif récemment, on n'en
+    # redéclenche pas un autre tant qu'il n'est ni confirmé (lecture fraîche
+    # nettement au-dessus du seuil) ni la fenêtre expirée -- sinon un hoquet
+    # de détection fait tourner ce refresh en boucle indéfiniment (bug
+    # observé : plus de 25s d'affilée, cf. commentaire plus haut).
+    # EN: Confirmation window (cf. MEIKO_DEFENSE_CONFIRM_WINDOW_S above): if a
+    # EN: proactive refresh was already triggered recently, we don't trigger
+    # EN: another one until it's either confirmed (a fresh reading clearly
+    # EN: above the threshold) or the window has expired -- otherwise a
+    # EN: detection hiccup makes this refresh loop indefinitely (bug observed:
+    # EN: 25+ seconds straight, cf. comment above).
+    strikes_remaining_s = state.resources.get("spirited_strikes_remaining_s")
+    strikes_refresh_pending_since = state.hooks.get("_strikes_refresh_pending_since")
+    strikes_refresh_recently_triggered = (
+        strikes_refresh_pending_since is not None
+        and now - strikes_refresh_pending_since < MEIKO_DEFENSE_CONFIRM_WINDOW_S
+    )
+    strikes_about_to_expire = (
+        primed
+        and not strikes_refresh_recently_triggered
+        and strikes_remaining_s is not None
+        and 0 < strikes_remaining_s <= STRIKES_PROACTIVE_REFRESH_WINDOW_S
+    )
+    if strikes_remaining_s is not None and strikes_remaining_s > STRIKES_PROACTIVE_REFRESH_WINDOW_S:
+        # Lecture fraîche confirmant que le refresh a réellement abouti (ou
+        # que rien n'était nécessaire) -- lève la fenêtre d'attente.
+        # EN: Fresh reading confirming the refresh actually succeeded (or that
+        # EN: nothing was needed) -- lifts the wait window.
+        state.hooks.pop("_strikes_refresh_pending_since", None)
+
+    # BUG TROUVÉ EN JEU (2026-07-17, rapport de session l'utilisateur) : "Spirited
+    # Strikes lancé deux fois de suite" en ouverture -- needs_refresh
+    # réagissait à vortex_up/strikes_up BRUTS, sans jamais consulter les
+    # fenêtres de confirmation (_vortex_open_pending_since/
+    # _strikes_open_pending_since) que la branche `if last == "spirit_palm":`
+    # plus bas tient déjà à jour. Séquence exacte observée : Strikes castée ->
+    # finisher -> "rien en cours" relu AVANT que la détection (YOLO, throttlé
+    # ~150ms, cf. state_update.py) n'ait rattrapé le nouveau buff ->
+    # needs_refresh redevenait vrai à tort (strikes_up encore lu False) ->
+    # réouvre spirit_palm -> DANS la branche, `not strikes_up and not
+    # strikes_recently_attempted` est cette fois FAUX (on est dans la
+    # fenêtre) donc le check ciblé est sauté -> tombe sur le "défaut sûr"
+    # en fin de branche, qui recastait Strikes AVEUGLÉMENT (cf. commentaire
+    # "cas limite" plus bas) -- d'où le double-cast. Fix ICI, à la source :
+    # needs_refresh ne doit considérer un buff comme "manquant" QUE s'il
+    # n'est ni up NI en attente de confirmation récente -- exactement le
+    # même garde-fou que la branche spirit_palm applique déjà en interne,
+    # remonté au niveau de la décision "faut-il seulement rouvrir".
+    # EN: BUG FOUND IN-GAME (2026-07-17, the user's session report): "Spirited
+    # EN: Strikes cast twice in a row" on opening -- needs_refresh reacted to
+    # EN: RAW vortex_up/strikes_up, never consulting the confirmation windows
+    # EN: (_vortex_open_pending_since/_strikes_open_pending_since) that the
+    # EN: `if last == "spirit_palm":` branch below already keeps up to date.
+    # EN: Exact sequence observed: Strikes cast -> finisher -> "nothing in
+    # EN: progress" re-read BEFORE detection (YOLO, throttled ~150ms, cf.
+    # EN: state_update.py) had caught up on the new buff -> needs_refresh
+    # EN: wrongly became true again (strikes_up still read False) -> reopens
+    # EN: spirit_palm -> INSIDE the branch, `not strikes_up and not
+    # EN: strikes_recently_attempted` is now FALSE (we're within the window)
+    # EN: so the targeted check is skipped -> falls to the "safe default" at
+    # EN: the end of the branch, which BLINDLY recast Strikes (cf. the "edge
+    # EN: case" comment below) -- hence the double-cast. Fix HERE, at the
+    # EN: source: needs_refresh must only consider a buff "missing" if it's
+    # EN: NEITHER up NOR recently pending confirmation -- exactly the same
+    # EN: guardrail the spirit_palm branch already applies internally, raised
+    # EN: up to the "should we even reopen" decision.
+    vortex_open_pending_since = state.hooks.get("_vortex_open_pending_since")
+    vortex_open_recently_attempted = (
+        vortex_open_pending_since is not None and now - vortex_open_pending_since < MEIKO_DEFENSE_CONFIRM_WINDOW_S
+    )
+    strikes_open_pending_since = state.hooks.get("_strikes_open_pending_since")
+    strikes_open_recently_attempted = (
+        strikes_open_pending_since is not None and now - strikes_open_pending_since < MEIKO_DEFENSE_CONFIRM_WINDOW_S
+    )
+    vortex_genuinely_missing = not vortex_up and not vortex_open_recently_attempted
+    strikes_genuinely_missing = not strikes_up and not strikes_open_recently_attempted
+
+    needs_refresh = stacks_maxed or strikes_about_to_expire or (
+        not primed and (vortex_genuinely_missing or strikes_genuinely_missing)
     )
     if needs_refresh:
+        if strikes_about_to_expire and not stacks_maxed:
+            state.hooks["_strikes_refresh_pending_since"] = now
         return "spirit_palm"
+
+    if not primed and vortex_up and strikes_up:
+        state.hooks["meiko_defense_primed"] = True
+        # Les deux confirmés -> les fenêtres d'attente de l'ouverture
+        # initiale n'ont plus lieu d'être (cf. phase d'ouverture initiale
+        # plus haut) -- les laisser traîner pourrait bloquer à tort un futur
+        # VRAI refresh bien plus tard dans le combat.
+        # EN: Both confirmed -> the initial-opening wait windows no longer
+        # EN: apply (cf. initial opening phase above) -- leaving them around
+        # EN: could wrongly block a genuinely new refresh much later in the
+        # EN: fight.
+        state.hooks.pop("_vortex_open_pending_since", None)
+        state.hooks.pop("_strikes_open_pending_since", None)
 
     return None
 
 
-def meiko_post_tick(state: State, pressed: str) -> None:
+def meiko_post_tick(state: CombatState, pressed: str) -> None:
     """
     Plus de bookkeeping de timers à faire ici : state.buffs est déjà tenu à
     jour par state_update_fn (lecture d'écran) à chaque tick, avant même que
@@ -376,7 +742,7 @@ MIN_ABSENT_TICKS = 3
 # Hammer Storm est un cast (canalisation) qui ne doit JAMAIS être coupé par
 # une autre ability -- y compris les off_gcd (culling_strike, focused_wrath,
 # thunder_call...), qui bypassent normalement le gate de GCD classique.
-# state.flags["hammer_storm_casting"] est posé par make_tariq_state_update_fn
+# state.hooks["hammer_storm_casting"] est posé par make_tariq_state_update_fn
 # (main.py) via bar_reader.read_fill_pct sur la cast bar (direction="ltr" --
 # le rempli est ancré à gauche, le bord droit recule vers la gauche pendant
 # la canalisation -- vérifié image par image sur un clip Game Bar, cf.
@@ -388,7 +754,7 @@ MIN_ABSENT_TICKS = 3
 # EN: Hammer Storm is a cast (channel) that must NEVER be interrupted by
 # EN: another ability -- including the off_gcd ones (culling_strike,
 # EN: focused_wrath, thunder_call...), which normally bypass the classic GCD
-# EN: gate. state.flags["hammer_storm_casting"] is set by
+# EN: gate. state.hooks["hammer_storm_casting"] is set by
 # EN: make_tariq_state_update_fn (main.py) via bar_reader.read_fill_pct on the
 # EN: cast bar (direction="ltr" -- the fill is anchored left, the right edge
 # EN: recedes leftward during the channel -- verified frame by frame on a Game
@@ -499,7 +865,7 @@ SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED = 12.0   # config/tariq.yaml : fury
 #
 # Fix : même principe que le reste du projet (détecter l'état réel, jamais
 # l'estimer). On a DÉJÀ un signal de vérité terrain pour "Hammer Storm a
-# réellement commencé à canaliser" -- state.flags["hammer_storm_casting"]
+# réellement commencé à canaliser" -- state.hooks["hammer_storm_casting"]
 # (cast bar, cf. HAMMER_STORM_LOCK_REFRESH_S ci-dessus). tariq_post_tick ne
 # marque donc plus le proc "consommé" au moment de la presse -- il pose
 # juste un marqueur "en attente de confirmation". tariq_pre_tick confirme
@@ -533,7 +899,7 @@ SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED = 12.0   # config/tariq.yaml : fury
 # EN:
 # EN: Fix: same principle as the rest of the project (detect the real state,
 # EN: never estimate it). We ALREADY have a ground-truth signal for "Hammer
-# EN: Storm actually started channeling" -- state.flags["hammer_storm_casting"]
+# EN: Storm actually started channeling" -- state.hooks["hammer_storm_casting"]
 # EN: (cast bar, cf. HAMMER_STORM_LOCK_REFRESH_S above). tariq_post_tick
 # EN: therefore no longer marks the proc "consumed" at press time -- it just
 # EN: sets a "pending confirmation" marker. tariq_pre_tick confirms (really
@@ -559,7 +925,7 @@ HAMMER_STORM_PROC_CONFIRM_WINDOW_S = 0.5   # marge après la presse pour laisser
 #
 # CE N'EST PAS une Behavior Tree ni un scoring général (cf. audit
 # 2026-07-13 : rejetés faute de preuve qu'un vrai problème de PRIORITÉ existe
-# aujourd'hui). C'est un objectif temporaire (state.flags["tariq_objective"])
+# aujourd'hui). C'est un objectif temporaire (state.hooks["tariq_objective"])
 # qui active/désactive quelques flags -- lus par les conditions YAML
 # existantes exactement comme n'importe quel autre flag du projet
 # (warden_stacks, hammer_storm_proc_ready...). Les priorités elles-mêmes ne
@@ -600,7 +966,7 @@ HAMMER_STORM_PROC_CONFIRM_WINDOW_S = 0.5   # marge après la presse pour laisser
 # EN:
 # EN: THIS IS NOT a Behavior Tree nor a general scoring (cf. the 2026-07-13
 # EN: audit: rejected for lack of proof that a real PRIORITY problem exists
-# EN: today). It's a temporary objective (state.flags["tariq_objective"]) that
+# EN: today). It's a temporary objective (state.hooks["tariq_objective"]) that
 # EN: enables/disables a few flags -- read by the existing YAML conditions
 # EN: exactly like any other project flag (warden_stacks,
 # EN: hammer_storm_proc_ready...). The priorities themselves NEVER change: a
@@ -640,8 +1006,8 @@ BURST_PREP_WINDOW_S = 8.0   # au-delà, retenir le premier reviendrait à geler 
 BURST_TIMEOUT_MARGIN_S = 2.0   # marge de sécurité au-delà de BURST_PREP_WINDOW_S avant d'abandonner l'attente -- ne bloque jamais indéfiniment si un cooldown dérive plus que prévu (ex. hard_lock Hammer Storm qui retarde tout pendant l'attente) · EN: safety margin beyond BURST_PREP_WINDOW_S before abandoning the wait -- never blocks indefinitely if a cooldown drifts more than expected (e.g. Hammer Storm hard_lock delaying everything during the wait)
 
 
-def _update_tariq_planner(state: State, now: float) -> None:
-    objective = state.flags.get("tariq_objective", "normal")
+def _update_tariq_planner(state: CombatState, now: float) -> None:
+    objective = state.planner.get("tariq_objective", "normal")
 
     fw_ready_in = state.cooldown_until.get("focused_wrath", 0.0) - now
     tc_ready_in = state.cooldown_until.get("thunder_call", 0.0) - now
@@ -649,17 +1015,17 @@ def _update_tariq_planner(state: State, now: float) -> None:
     tc_ready = tc_ready_in <= 0
 
     if objective == "prepare_burst":
-        since = state.flags.get("tariq_objective_since", now)
+        since = state.planner.get("tariq_objective_since", now)
         timed_out = now - since > BURST_PREP_WINDOW_S + BURST_TIMEOUT_MARGIN_S
         if (fw_ready and tc_ready) or timed_out:
             objective = "normal"
     elif (fw_ready and 0 < tc_ready_in <= BURST_PREP_WINDOW_S) or (tc_ready and 0 < fw_ready_in <= BURST_PREP_WINDOW_S):
         objective = "prepare_burst"
-        state.flags["tariq_objective_since"] = now
+        state.planner["tariq_objective_since"] = now
 
-    state.flags["tariq_objective"] = objective
-    state.flags["burst_hold"] = objective == "prepare_burst"
-    state.flags["fury_conserve"] = objective == "prepare_burst"
+    state.planner["tariq_objective"] = objective
+    state.planner["burst_hold"] = objective == "prepare_burst"
+    state.planner["fury_conserve"] = objective == "prepare_burst"
 
 
 # =============================================================================
@@ -735,10 +1101,10 @@ OFF_GCD_VEIL_ABILITY_BUFF_KEYS = {
 }
 
 
-def _register_press_confirmation(state: State, pressed: str, now: float) -> None:
+def _register_press_confirmation(state: CombatState, pressed: str, now: float) -> None:
     if pressed not in GCD_VEIL_ABILITIES and pressed not in OFF_GCD_VEIL_ABILITY_BUFF_KEYS:
         return   # ability sans voile suivi (ex: culling_strike/thunder_call/focused_wrath sont dans OFF_GCD_..., donc bien couverts -- seules face_breaker/wild_swing/etc. via GCD_VEIL_ABILITIES et les 3 off_gcd sont trackées) · EN: ability with no tracked veil (culling_strike/thunder_call/focused_wrath are in OFF_GCD_..., so well covered -- only face_breaker/wild_swing/etc. via GCD_VEIL_ABILITIES and the 3 off_gcd are tracked)
-    pending = state.flags.setdefault("_press_confirmations_pending", [])
+    pending = state.hooks.setdefault("_press_confirmations_pending", [])
     pending.append({
         "ability": pressed,
         "requested_at_monotonic": now,
@@ -746,7 +1112,7 @@ def _register_press_confirmation(state: State, pressed: str, now: float) -> None
     })
 
 
-def _resolve_press_confirmations(state: State, now: float) -> None:
+def _resolve_press_confirmations(state: CombatState, now: float) -> None:
     # BUG TROUVÉ (2026-07-14, 1re session avec cette instrumentation) : 13 des
     # 38 PHANTOM_PRESS journalisés coïncidaient EXACTEMENT avec un cycle
     # pause/reprise (touche C) -- RotationEngine.tick() (donc tariq_pre_tick,
@@ -772,13 +1138,13 @@ def _resolve_press_confirmations(state: State, now: float) -> None:
     # EN: just resumed after a block (pause or other) -- we DROP the pending
     # EN: confirmations WITHOUT logging them as a failure (uninterpretable),
     # EN: rather than producing a false PHANTOM_PRESS.
-    last_seen = state.flags.get("_press_confirm_last_tick_at")
-    state.flags["_press_confirm_last_tick_at"] = now
+    last_seen = state.hooks.get("_press_confirm_last_tick_at")
+    state.hooks["_press_confirm_last_tick_at"] = now
     if last_seen is not None and now - last_seen > 0.5:
-        state.flags["_press_confirmations_pending"] = []
+        state.hooks["_press_confirmations_pending"] = []
         return
 
-    pending = state.flags.get("_press_confirmations_pending")
+    pending = state.hooks.get("_press_confirmations_pending")
     if not pending:
         return
     still_pending = []
@@ -795,24 +1161,49 @@ def _resolve_press_confirmations(state: State, now: float) -> None:
             log_press_confirmation(ability, entry["requested_at_wall"], None, "PHANTOM_PRESS")
         else:
             still_pending.append(entry)
-    state.flags["_press_confirmations_pending"] = still_pending
+    state.hooks["_press_confirmations_pending"] = still_pending
 
 
-def tariq_pre_tick(state: State) -> Optional[str]:
+def tariq_pre_tick(state: CombatState) -> list[Intent]:
+    """
+    Câblé comme pre_tick_hook (cf. RotationEngine, engine.py::Intent) -- doit
+    retourner une liste d'Intent, pas un nom nu. Toute la logique (planner,
+    confirmations de presse, verrou Hammer Storm, front montant des procs,
+    discount Focused Wrath...) reste intacte dans _tariq_pre_tick_impl
+    ci-dessous, appelée UNE SEULE fois (ses effets de bord -- planner,
+    resolve_press_confirmations, hard_lock_until -- ne doivent jamais
+    tourner deux fois par tick). Poids fixe de 90 (cf. Intent, engine.py) :
+    reproduit fidèlement l'ancien comportement de "GOTO absolu" -- migration
+    mécanique, zéro changement de comportement.
+
+    EN: Wired as pre_tick_hook (cf. RotationEngine, engine.py::Intent) -- must
+    EN: return a list of Intent, not a bare name. All the logic (planner,
+    EN: press confirmations, Hammer Storm lock, proc rising edge, Focused
+    EN: Wrath discount...) stays intact in _tariq_pre_tick_impl below, called
+    EN: EXACTLY ONCE (its side effects -- planner, resolve_press_confirmations,
+    EN: hard_lock_until -- must never run twice per tick). Fixed weight of 90
+    EN: (cf. Intent, engine.py): faithfully reproduces the former "absolute
+    EN: GOTO" behavior -- mechanical migration, zero behavior change.
+    """
+    ability = _tariq_pre_tick_impl(state)
+    return [Intent(ability=ability, weight=90, source="tariq_pre_tick")] if ability else []
+
+
+def _tariq_pre_tick_impl(state: CombatState) -> Optional[str]:
     now = time.monotonic()
     _update_tariq_planner(state, now)
     _resolve_press_confirmations(state, now)
-    if state.flags.get("hammer_storm_casting", False):
+    if state.detection.get("hammer_storm_casting", False):
         state.hard_lock_until = max(state.hard_lock_until, now + HAMMER_STORM_LOCK_REFRESH_S)
-        if state.flags.get("_hammer_storm_proc_pending", False):
+        if state.hooks.get("_hammer_storm_proc_pending", False):
             # Canalisation confirmée pendant la fenêtre d'attente -> le press
             # a réellement abouti, le proc est VRAIMENT consommé maintenant.
             # EN: Channel confirmed during the wait window -> the press really
             # EN: succeeded, the proc is TRULY consumed now.
-            state.flags["hammer_storm_proc_ready"] = False
-            state.flags["_hammer_storm_proc_pending"] = False
+            state.hooks["hammer_storm_proc_ready"] = False
+            state.hooks["_hammer_storm_proc_pending"] = False
 
-    pending_since = state.flags.get("_hammer_storm_proc_pending_since")
+    pending_since = state.hooks.get("_hammer_storm_proc_pending_since")
     if pending_since is not None and now - pending_since > HAMMER_STORM_PROC_CONFIRM_WINDOW_S:
         # Fenêtre expirée sans canalisation détectée -> le jeu a refusé le
         # cast (Fury réelle insuffisante, très probablement). ready n'a
@@ -824,27 +1215,27 @@ def tariq_pre_tick(state: State) -> Optional[str]:
         # EN: cleared (cf. tariq_post_tick) -- nothing to restore, we just lift
         # EN: the pending marker to allow a new attempt as soon as the
         # EN: conditions are met.
-        state.flags["_hammer_storm_proc_pending"] = False
-        state.flags.pop("_hammer_storm_proc_pending_since", None)
+        state.hooks["_hammer_storm_proc_pending"] = False
+        state.hooks.pop("_hammer_storm_proc_pending_since", None)
 
     for proc_name, buff_name in TARIQ_PROC_BUFFS.items():
         prev_key = f"_{buff_name}_prev"
         absent_ticks_key = f"_{buff_name}_absent_ticks"
         ready_key = f"{proc_name}_ready"
 
-        was_active = state.flags.get(prev_key, False)
+        was_active = state.hooks.get(prev_key, False)
         is_active = state.buffs.get(buff_name, False)
-        absent_ticks = state.flags.get(absent_ticks_key, MIN_ABSENT_TICKS)
+        absent_ticks = state.hooks.get(absent_ticks_key, MIN_ABSENT_TICKS)
 
         if is_active:
             if not was_active and absent_ticks >= MIN_ABSENT_TICKS:
-                state.flags[ready_key] = True
+                state.hooks[ready_key] = True
             absent_ticks = 0
         else:
             absent_ticks += 1
 
-        state.flags[absent_ticks_key] = absent_ticks
-        state.flags[prev_key] = is_active
+        state.hooks[absent_ticks_key] = absent_ticks
+        state.hooks[prev_key] = is_active
 
     # Focused Wrath réduit de 50% le coût en Fury des 2 prochains Hammer
     # Storm/Skull Crusher (cf. commentaire HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED
@@ -863,14 +1254,14 @@ def tariq_pre_tick(state: State) -> Optional[str]:
         if (
             now >= state.gcd_until
             and not state.is_on_cooldown("hammer_storm_proc", now)
-            and state.flags.get("hammer_storm_proc_ready", False)
+            and state.hooks.get("hammer_storm_proc_ready", False)
             and fury_pct >= HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED
         ):
             return "hammer_storm_proc"
         if (
             now >= state.gcd_until
             and not state.is_on_cooldown("skull_crusher_proc", now)
-            and state.flags.get("skull_crusher_proc_ready", False)
+            and state.hooks.get("skull_crusher_proc_ready", False)
             and fury_pct >= SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED
         ):
             return "skull_crusher_proc"
@@ -878,7 +1269,7 @@ def tariq_pre_tick(state: State) -> Optional[str]:
     return None
 
 
-def tariq_post_tick(state: State, pressed: str) -> None:
+def tariq_post_tick(state: CombatState, pressed: str) -> None:
     _register_press_confirmation(state, pressed, time.monotonic())
     if pressed == "hammer_storm_proc":
         # Ne PAS effacer ready ici -- cf. HAMMER_STORM_PROC_CONFIRM_WINDOW_S :
@@ -889,7 +1280,7 @@ def tariq_post_tick(state: State, pressed: str) -> None:
         # EN: only a channel actually detected (tariq_pre_tick) confirms the
         # EN: consumption. We just set the pending marker with THIS press's
         # EN: timestamp.
-        state.flags["_hammer_storm_proc_pending"] = True
-        state.flags["_hammer_storm_proc_pending_since"] = time.monotonic()
+        state.hooks["_hammer_storm_proc_pending"] = True
+        state.hooks["_hammer_storm_proc_pending_since"] = time.monotonic()
     elif pressed in TARIQ_PROC_BUFFS:
-        state.flags[f"{pressed}_ready"] = False
+        state.hooks[f"{pressed}_ready"] = False

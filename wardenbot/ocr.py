@@ -59,7 +59,13 @@ def _get_reader():
 def _preprocess(frame: np.ndarray, upscale: int = 3) -> np.ndarray:
     """Niveaux de gris -> upscale -> seuillage Otsu (binaire noir/blanc).
     Rend les petits chiffres d'UI nettement plus lisibles qu'un crop couleur
-    brut, même pour un OCR deep-learning."""
+    brut, même pour un OCR deep-learning.
+
+    NE MARCHE PAS sur un fond texturé/multicolore (cf. _upscale_only ci-
+    dessous et son commentaire) -- Otsu suppose un histogramme globalement
+    bimodal (texte net vs fond uni), qui n'existe pas sur un artwork d'icône
+    de buff (spirale/dégradé). Réservé aux zones à fond UNI (barres de
+    Tariq, badges de stacks) où ça a été validé."""
     if cv2 is None:
         raise ImportError("opencv-python-headless requis pour l'OCR : pip install opencv-python-headless")
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -67,6 +73,29 @@ def _preprocess(frame: np.ndarray, upscale: int = 3) -> np.ndarray:
         gray = cv2.resize(gray, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
     _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     return thresh
+
+
+def _upscale_only(frame: np.ndarray, upscale: int = 3) -> np.ndarray:
+    """Niveaux de gris -> upscale, SANS binarisation Otsu.
+
+    BUG TROUVÉ EN JEU (2026-07-16, comparaison log/vidéo avec l'utilisateur) :
+    read_countdown_seconds (via _preprocess/Otsu) lisait "4.0" en continu
+    alors que la vidéo montrait clairement "26" affiché au même instant --
+    testé en isolant chaque étape : le crop couleur BRUT lit "26" avec
+    ~99.9999% de confiance EasyOCR, mais la version Otsu-binarisée ne
+    détecte RIEN DU TOUT. Root cause : Otsu suppose un fond globalement
+    bimodal (texte net sur fond uni) -- sur l'artwork d'un buff Meiko
+    (spirale/dégradé violet à fort contraste LOCAL mais PAS bimodal
+    globalement), le seuil choisi automatiquement détruit le chiffre au lieu
+    de l'isoler. Validé sur 3 échantillons vidéo supplémentaires (30, 14,
+    18) : upscale seul (gris ou couleur, sans Otsu) lit correctement dans
+    tous les cas testés, contre 0/4 pour la version Otsu."""
+    if cv2 is None:
+        raise ImportError("opencv-python-headless requis pour l'OCR : pip install opencv-python-headless")
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if upscale > 1:
+        gray = cv2.resize(gray, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
+    return gray
 
 
 def read_digits(frame: np.ndarray) -> Optional[int]:
@@ -78,6 +107,34 @@ def read_digits(frame: np.ndarray) -> Optional[int]:
     results = reader.readtext(processed, allowlist="0123456789", detail=0)
     digits = "".join(c for c in "".join(results) if c.isdigit())
     return int(digits) if digits else None
+
+
+def read_countdown_seconds(frame: np.ndarray) -> Optional[float]:
+    """Lit un compte à rebours affiché en secondes sur une icône de buff
+    (ex: '27', '16', '1.8', '0.4') et retourne un float, ou None si rien de
+    lisible.
+
+    AJOUTÉ (2026-07-16) pour le refresh proactif de Spirited Strikes côté
+    Meiko (cf. hooks.py) -- contrairement à read_digits(), l'allowlist inclut
+    le point décimal. Sans ça, '1.8' serait lu comme '18' (le point est
+    silencieusement supprimé par l'allowlist digits-only, valeur x10 fausse)
+    -- CRITIQUE ici : le jeu affiche justement le compte à rebours en
+    décimal quand il approche de 0 (vu sur templates/meiko lors de la
+    capture YOLO : '3.3', '1.8', '0.4'...), exactement la plage où un
+    refresh proactif doit se déclencher -- une lecture x10 fausse dans cette
+    plage précise ferait rater le refresh (ex: '1.8' lu comme 18s -> jamais
+    sous le seuil de 5s avant que le buff n'expire pour de vrai)."""
+    reader = _get_reader()
+    processed = _upscale_only(frame)   # PAS _preprocess/Otsu -- cf. docstring _upscale_only
+    results = reader.readtext(processed, allowlist="0123456789.", detail=0)
+    text = "".join(results).strip()
+    cleaned = "".join(c for c in text if c.isdigit() or c == ".")
+    if not cleaned or cleaned == ".":
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
 
 def read_text(frame: np.ndarray) -> str:

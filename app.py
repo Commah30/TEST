@@ -217,7 +217,7 @@ class BotController:
         s["pressed"] = pressed
         s["fps"] = CHARACTERS[self.character].get("tick_hz", 30.0)
         # Pas de signal de confiance agrégé dans engine.py aujourd'hui (matcher
-        # confidence est transitoire, par ability, jamais stocké sur State) --
+        # confidence est transitoire, par ability, jamais stocké sur CombatState) --
         # laissé à 0.0 plutôt qu'une valeur inventée.
         s["confidence"] = 0.0
 

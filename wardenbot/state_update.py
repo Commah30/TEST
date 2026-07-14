@@ -20,49 +20,309 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 from wardenbot.bar_reader import read_fill_pct
 from wardenbot.capture import ScreenCapture
 from wardenbot.diagnostics import CAPTURE_WATCHDOG_THRESHOLD_S, log_error, log_pipeline_diagnostic, log_slow_call
-from wardenbot.engine import State
+from wardenbot.engine import CombatState
+from wardenbot.freshness import DetectionMeta, FreshnessPolicy
 from wardenbot.matcher import TemplateMatcher
-from wardenbot.yolo_detect import detect, get_last_predict_speed_ms
+from wardenbot.ocr import read_countdown_seconds
+from wardenbot.yolo_detect import MEIKO_YOLO_WEIGHTS_PATH, detect, detect_with_boxes, get_last_predict_speed_ms
+
+# =============================================================================
+# Fraîcheur (Phase 0, 2026-07-14, cf. discussion architecture) : une politique
+# PAR SOURCE, pas une seule -- un buff YOLO et une lecture OCR ne vieillissent
+# pas à la même vitesse (cf. wardenbot/freshness.py). fresh_ms/stale_ms calés
+# sur les intervalles de throttle RÉELS mesurés dans ce fichier
+# (MEIKO_YOLO_DETECT_INTERVAL_S/MEIKO_OCR_INTERVAL_S/YOLO_DETECT_INTERVAL_S/
+# TARIQ_DETECTION_WORKER_HZ ci-dessous) -- valeurs de départ raisonnables, PAS
+# encore validées empiriquement en jeu réel (même statut que d'autres seuils
+# du projet avant confirmation, cf. HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED
+# et son historique de calibration). Rien ne consomme encore ces politiques
+# pour décider quoi que ce soit (cf. wardenbot/freshness.py -- ce module ne
+# fait QUE classifier, jamais agir) : c'est le socle mesurable, pas encore le
+# câblage dans hooks.py.
+# EN: Freshness (Phase 0, 2026-07-14, cf. architecture discussion): a policy
+# EN: PER SOURCE, not a single one -- a YOLO buff and an OCR reading don't age
+# EN: at the same speed (cf. wardenbot/freshness.py). fresh_ms/stale_ms are
+# EN: calibrated on the REAL throttle intervals measured in this file
+# EN: (MEIKO_YOLO_DETECT_INTERVAL_S/MEIKO_OCR_INTERVAL_S/YOLO_DETECT_INTERVAL_S/
+# EN: TARIQ_DETECTION_WORKER_HZ below) -- reasonable starting values, NOT yet
+# EN: empirically validated in a real game (same status as other thresholds in
+# EN: this project before confirmation, cf.
+# EN: HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED and its calibration history).
+# EN: Nothing consumes these policies yet to decide anything (cf.
+# EN: wardenbot/freshness.py -- that module ONLY classifies, never acts): this
+# EN: is the measurable foundation, not yet the wiring into hooks.py.
+MEIKO_YOLO_FRESHNESS_POLICY = FreshnessPolicy(fresh_ms=200, stale_ms=600)     # throttle 150ms, cf. MEIKO_YOLO_DETECT_INTERVAL_S plus bas · EN: 150ms throttle, cf. MEIKO_YOLO_DETECT_INTERVAL_S below
+MEIKO_OCR_FRESHNESS_POLICY = FreshnessPolicy(fresh_ms=600, stale_ms=2000)     # throttle 400ms + seulement quand spirited_strikes est détecté, cf. MEIKO_OCR_INTERVAL_S plus bas · EN: 400ms throttle + only when spirited_strikes is detected, cf. MEIKO_OCR_INTERVAL_S below
+TARIQ_YOLO_FRESHNESS_POLICY = FreshnessPolicy(fresh_ms=200, stale_ms=600)     # throttle 150ms, cf. YOLO_DETECT_INTERVAL_S plus bas · EN: 150ms throttle, cf. YOLO_DETECT_INTERVAL_S below
+TARIQ_BARS_FRESHNESS_POLICY = FreshnessPolicy(fresh_ms=150, stale_ms=400)     # rafraîchi à CHAQUE cycle du thread détection (~67ms à 15Hz, cf. TARIQ_DETECTION_WORKER_HZ) -- une valeur STALE/EXPIRED ici signalerait le thread lui-même bloqué (cf. CLAUDE.md, épisodes de snapshot figé), pas juste un throttle normal · EN: refreshed on EVERY detection thread cycle (~67ms at 15Hz, cf. TARIQ_DETECTION_WORKER_HZ) -- a STALE/EXPIRED value here would signal the thread itself stuck (cf. CLAUDE.md, frozen-snapshot episodes), not just normal throttling
+
+# BUG TROUVÉ EN JEU (2026-07-16, rapporté par l'utilisateur) : "la rotation ne fait
+# que spam le combo Spirited Vortex/Strikes" -- root cause réelle : la
+# détection tournait sur cv2.matchTemplate (matcher.py), dont la confiance
+# mesurée pour spirited_vortex/spirited_strikes oscille entre 0.55 et 0.73
+# selon le chiffre de décompte affiché sur l'icône (sous ou pile au seuil de
+# prod 0.70, cf. discussion) -- state.buffs["spirited_vortex"/"spirited_strikes"]
+# scintillait False par intermittence même buff up, empêchant
+# meiko_defense_primed (hooks.py) de jamais se stabiliser à True -> le combo
+# défensif se rouvrait en boucle. Fix : détection par le modèle YOLO entraîné
+# spécifiquement pour Meiko (cf. build_yolo_dataset.py --character meiko,
+# train_yolo.py) -- P>=0.994/R=1.0 sur validation -- au lieu du template
+# matching. Même architecture que Tariq (thread de détection dédié, cf.
+# _run_meiko_detection_worker plus bas) : YOLO/OCR sont trop coûteux pour
+# tourner dans le tick principal (~60Hz).
+MEIKO_DETECTION_WORKER_HZ = 10.0
+MEIKO_YOLO_DETECT_INTERVAL_S = 0.15   # même easing que Tariq (YOLO_DETECT_INTERVAL_S) -- cf. state_update.py plus bas
+MEIKO_YOLO_CONF = 0.5
+
+# DEMANDE DE L'UTILISATEUR (2026-07-16) : refresh proactif de Spirited Strikes 5s
+# avant expiration (buff de 30s), au lieu d'attendre qu'il tombe à False --
+# nécessite de lire le VRAI compte à rebours affiché sur l'icône (OCR), pas
+# une estimation dérivée d'un timer local (cf. CLAUDE.md, principe "jamais
+# estimer un état détectable à l'écran" -- ici on détecte la vraie valeur
+# affichée par le jeu, on ne l'estime pas). OCR nettement plus coûteux que
+# YOLO (cf. ocr.py) -- throttlé plus fort, et seulement quand
+# spirited_strikes est déjà détecté présent (rien à lire sinon).
+MEIKO_OCR_INTERVAL_S = 0.4
+
+# BUG TROUVÉ EN JEU (2026-07-16, comparaison log/vidéo avec l'utilisateur) : l'OCR
+# lisait "4.0" en continu pendant 19s+ alors que la vidéo montre clairement
+# "26" affiché sur l'icône au même instant -- la boîte YOLO complète (toute
+# l'icône, ~70x73px) inclut trop de l'artwork environnant (spirale/éclair
+# violet à fort contraste, cf. templates/meiko/spirited_strikes.png) qui
+# survit à la binarisation Otsu (ocr.py::_preprocess) et perturbe EasyOCR.
+# Mesuré sur le template capturé : le chiffre n'occupe qu'une fraction de la
+# boîte, environ x:[20%,82%] y:[45%,80%] -- on resserre le crop OCR à cette
+# sous-région plutôt que toute la boîte détectée par YOLO.
+# EN: BUG FOUND IN-GAME (2026-07-16, log/video comparison with the user): OCR
+# EN: kept reading "4.0" for 19s+ while the video clearly shows "26" displayed
+# EN: on the icon at that same instant -- the full YOLO box (the whole icon,
+# EN: ~70x73px) includes too much of the surrounding artwork (high-contrast
+# EN: purple spiral/lightning, cf. templates/meiko/spirited_strikes.png) which
+# EN: survives Otsu binarization (ocr.py::_preprocess) and confuses EasyOCR.
+# EN: Measured on the captured template: the number only occupies a fraction
+# EN: of the box, roughly x:[20%,82%] y:[45%,80%] -- the OCR crop is narrowed
+# EN: to this sub-region instead of the whole YOLO-detected box.
+STRIKES_COUNTDOWN_CROP_X = (0.20, 0.82)
+STRIKES_COUNTDOWN_CROP_Y = (0.45, 0.80)
+
+
+@dataclass
+class MeikoDetectionSnapshot:
+    spirited_vortex: bool = False
+    spirited_strikes: bool = False
+    warden_of_the_temple_3: bool = False
+    spirited_strikes_remaining_s: Optional[float] = None
+    stormfall: float = 0.0
+    # Fraîcheur (Phase 0, 2026-07-14) : 3 horodatages, PAS un seul -- ce
+    # snapshot mélange 3 cadences réelles différentes (cf. commentaire
+    # MEIKO_YOLO_FRESHNESS_POLICY plus haut) : stormfall (recalculé à CHAQUE
+    # cycle du thread, ~100ms), vortex/strikes/warden_3 (YOLO, throttlé
+    # ~150ms), strikes_remaining_s (OCR, throttlé ~400ms ET seulement quand
+    # spirited_strikes est détecté). created_at reste MUTABLE ici (comme tout
+    # le reste du dataclass) -- pas de frozen=True, ce Snapshot est construit
+    # champ par champ pendant tout le cycle avant publication atomique (cf.
+    # wardenbot/freshness.py::DetectionMeta pour l'objet-valeur figé qui, lui,
+    # encapsule un seul de ces horodatages une fois recopié dans CombatState).
+    # EN: Freshness (Phase 0, 2026-07-14): 3 timestamps, NOT a single one --
+    # EN: this snapshot mixes 3 genuinely different cadences (cf. the
+    # EN: MEIKO_YOLO_FRESHNESS_POLICY comment above): stormfall (recomputed on
+    # EN: EVERY thread cycle, ~100ms), vortex/strikes/warden_3 (YOLO, throttled
+    # EN: ~150ms), strikes_remaining_s (OCR, throttled ~400ms AND only when
+    # EN: spirited_strikes is detected). created_at stays MUTABLE here (like
+    # EN: the rest of the dataclass) -- no frozen=True, this Snapshot is built
+    # EN: field by field throughout the cycle before atomic publication (cf.
+    # EN: wardenbot/freshness.py::DetectionMeta for the frozen value object
+    # EN: that, itself, wraps a single one of these timestamps once copied
+    # EN: into CombatState).
+    created_at: float = 0.0        # cycle entier (stormfall) · EN: whole cycle (stormfall)
+    yolo_created_at: float = 0.0   # vortex/strikes/warden_3 · EN: vortex/strikes/warden_3
+    ocr_created_at: Optional[float] = None   # strikes_remaining_s -- None tant qu'aucune lecture OCR n'a jamais eu lieu · EN: strikes_remaining_s -- None as long as no OCR reading has ever happened
+
+
+def _run_meiko_detection_worker(regions: dict, snapshot_box: dict, stop_event: threading.Event) -> None:
+    # Instance dédiée à CE thread -- un mss.mss() n'est valide que sur le
+    # thread qui l'a créé (cf. wardenbot/capture.py, même bug BitBlt déjà
+    # rencontré côté Tariq). Jamais le `capturer` reçu par
+    # make_meiko_state_update_fn, construit sur un autre thread.
+    worker_capturer = ScreenCapture()
+    worker_matcher = TemplateMatcher("templates/meiko")   # cf. wardenbot/game_config.py CHARACTERS["meiko"]["templates"]
+    period = 1.0 / MEIKO_DETECTION_WORKER_HZ
+    last_yolo_t = 0.0
+    last_ocr_t = 0.0
+    last_boxes: list = []
+
+    while not stop_event.is_set():
+        start = time.monotonic()
+        try:
+            buff_frame = worker_capturer.grab(regions["buff_bar"])
+            snap = MeikoDetectionSnapshot()
+
+            now = time.monotonic()
+            if now - last_yolo_t >= MEIKO_YOLO_DETECT_INTERVAL_S:
+                last_yolo_t = now
+                last_boxes = detect_with_boxes(buff_frame, conf=MEIKO_YOLO_CONF, weights_path=MEIKO_YOLO_WEIGHTS_PATH)
+
+            best: dict[str, tuple[float, tuple[float, float, float, float]]] = {}
+            for class_name, confidence, box in last_boxes:
+                if confidence > best.get(class_name, (0.0, None))[0]:
+                    best[class_name] = (confidence, box)
+
+            snap.spirited_vortex = "spirited_vortex" in best
+            snap.spirited_strikes = "spirited_strikes" in best
+            snap.warden_of_the_temple_3 = "warden_of_the_temple_3" in best
+
+            # Compte à rebours de Spirited Strikes (OCR sur une sous-région de
+            # la boîte YOLO -- seule façon de savoir OÙ lire, la barre étant
+            # dynamique/centrée, cf. commentaire module plus haut). Sous-crop
+            # (cf. STRIKES_COUNTDOWN_CROP_X/Y plus haut) : le chiffre n'occupe
+            # qu'une fraction de l'icône, le reste de l'artwork perturbe l'OCR.
+            if snap.spirited_strikes and now - last_ocr_t >= MEIKO_OCR_INTERVAL_S:
+                last_ocr_t = now
+                _, (cx, cy, bw, bh) = best["spirited_strikes"]
+                fh, fw = buff_frame.shape[:2]
+                box_x1 = (cx - bw / 2) * fw
+                box_y1 = (cy - bh / 2) * fh
+                box_w = bw * fw
+                box_h = bh * fh
+                x1 = max(0, int(box_x1 + STRIKES_COUNTDOWN_CROP_X[0] * box_w))
+                y1 = max(0, int(box_y1 + STRIKES_COUNTDOWN_CROP_Y[0] * box_h))
+                x2 = min(fw, int(box_x1 + STRIKES_COUNTDOWN_CROP_X[1] * box_w))
+                y2 = min(fh, int(box_y1 + STRIKES_COUNTDOWN_CROP_Y[1] * box_h))
+                if x2 > x1 and y2 > y1:
+                    ocr_crop = buff_frame[y1:y2, x1:x2]
+                    snap.spirited_strikes_remaining_s = read_countdown_seconds(ocr_crop)
+
+            # BUG TROUVÉ EN JEU (2026-07-16, rapporté par l'utilisateur) : stormfall
+            # restait bloqué à 0.0 en continu -- la région stormfall_lit
+            # (unique, binaire) datait d'avant l'alignement de l'UI de Meiko
+            # sur celle de Tariq, elle pointait dans le vide. Root cause plus
+            # profonde : Stormfall a en réalité DEUX charges/orbes distincts
+            # (confirmé par l'utilisateur, "pour bénéficier des deux orbes") -- un
+            # seul indicateur binaire ne peut pas représenter "1 orbe sur 2"
+            # correctement, il fallait deux régions/templates, un par orbe.
+            # 0 orbe allumé -> 0.0, 1 -> 0.5, 2 -> 1.0 (>= 0.999, cf. hooks.py :
+            # Lashing Stormkick ne doit spend QUE quand les deux orbes sont
+            # allumés).
+            orb_1_lit = worker_matcher.is_match(worker_capturer.grab(regions["stormfall_orb_1"]), "stormfall_orb_1")
+            orb_2_lit = worker_matcher.is_match(worker_capturer.grab(regions["stormfall_orb_2"]), "stormfall_orb_2")
+            snap.stormfall = (int(orb_1_lit) + int(orb_2_lit)) / 2.0
+
+            # Fraîcheur (Phase 0, 2026-07-14) : réutilise last_yolo_t/last_ocr_t
+            # (déjà suivis ci-dessus pour le throttle lui-même) -- ce sont
+            # EXACTEMENT les horodatages du dernier vrai appel YOLO/OCR, pas
+            # besoin d'un 3e mécanisme de suivi. last_ocr_t reste à 0.0 tant
+            # qu'aucune lecture OCR n'a jamais eu lieu cette session -> None
+            # plutôt qu'un faux horodatage (cf. state.gcd_until, même
+            # convention 0.0="jamais" ailleurs dans le projet).
+            # EN: Freshness (Phase 0, 2026-07-14): reuses last_yolo_t/last_ocr_t
+            # EN: (already tracked above for the throttle itself) -- these are
+            # EN: EXACTLY the timestamps of the last real YOLO/OCR call, no need
+            # EN: for a 3rd tracking mechanism. last_ocr_t stays at 0.0 as long
+            # EN: as no OCR reading has ever happened this session -> None
+            # EN: rather than a fake timestamp (cf. state.gcd_until, same
+            # EN: 0.0="never" convention elsewhere in the project).
+            snap.created_at = now
+            snap.yolo_created_at = last_yolo_t
+            snap.ocr_created_at = last_ocr_t if last_ocr_t > 0.0 else None
+
+            snapshot_box["latest"] = snap   # publication atomique -- jamais de mutation en place
+        except Exception as exc:
+            # ROBUSTESSE (même principe que _run_detection_worker côté Tariq,
+            # cf. plus bas) : un cycle qui échoue est journalisé et retenté,
+            # plutôt que de tuer silencieusement ce thread daemon.
+            log_error("meiko _run_meiko_detection_worker()", exc)
+
+        elapsed = time.monotonic() - start
+        if elapsed > CAPTURE_WATCHDOG_THRESHOLD_S:
+            log_slow_call("_run_meiko_detection_worker (cycle)", elapsed)
+        stop_event.wait(max(0.0, period - elapsed))
 
 
 def make_meiko_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher, regions: dict):
     """
-    Lit à l'écran les buffs/debuffs/ressources détectables par template et
-    remplit state.buffs/state.debuffs/state.resources -- appelé en tout
-    premier à chaque tick (cf. RotationEngine.state_update_fn). C'est ce
-    câblage qui manquait pour que meiko_pre_tick voie l'état RÉEL des buffs
-    Spirited Vortex/Strikes plutôt qu'un défaut à False en permanence.
+    Lit à l'écran les buffs/debuffs/ressources et remplit
+    state.buffs/state.debuffs/state.resources -- appelé en tout premier à
+    chaque tick (cf. RotationEngine.state_update_fn).
 
-    EN: Reads on-screen the template-detectable buffs/debuffs/resources and
-    EN: fills state.buffs/state.debuffs/state.resources -- called first of all
-    EN: every tick (cf. RotationEngine.state_update_fn). This is the wiring that
-    EN: was missing for meiko_pre_tick to see the REAL state of the Spirited
-    EN: Vortex/Strikes buffs rather than a permanent False default.
+    `capturer`/`matcher` reçus ici uniquement pour garder la même signature
+    que make_tariq_state_update_fn (build_engine appelle les deux de façon
+    générique, cf. main.py) -- PAS utilisés directement : le thread de
+    détection (_run_meiko_detection_worker) construit ses propres instances,
+    un mss.mss() n'étant valide que sur le thread qui l'a créé.
+
+    DÉTECTION PAR YOLO (2026-07-16, remplace le template matching) : cf.
+    commentaire MEIKO_DETECTION_WORKER_HZ plus haut pour le bug que ça
+    corrige (spam du combo défensif dû à une détection peu fiable). Même
+    architecture que Tariq : thread dédié qui publie un instantané immuable,
+    cette fonction ne fait que le copier dans `state` -- jamais de calcul
+    lourd dans le tick principal.
+
+    EN: Reads on-screen buffs/debuffs/resources and fills
+    EN: state.buffs/state.debuffs/state.resources -- called first of all every
+    EN: tick (cf. RotationEngine.state_update_fn).
+    EN:
+    EN: `capturer`/`matcher` received here only to keep the same signature as
+    EN: make_tariq_state_update_fn (build_engine calls both generically, cf.
+    EN: main.py) -- NOT used directly: the detection thread
+    EN: (_run_meiko_detection_worker) builds its own instances, an mss.mss()
+    EN: being valid only on the thread that created it.
+    EN:
+    EN: YOLO-BASED DETECTION (2026-07-16, replaces template matching): cf. the
+    EN: MEIKO_DETECTION_WORKER_HZ comment above for the bug this fixes
+    EN: (defensive combo spam caused by unreliable detection). Same
+    EN: architecture as Tariq: a dedicated thread publishes an immutable
+    EN: snapshot, this function only copies it into `state` -- never any heavy
+    EN: computation in the main tick.
     """
-    def state_update_fn(state: State) -> None:
-        # Une seule capture de la zone large, réutilisée pour chercher les 3
-        # templates dedans -- au lieu d'une capture étroite par icône (fragile
-        # dès que la barre de buffs se réorganise et décale les icônes).
-        # EN: A single capture of the wide area, reused to search the 3
-        # EN: templates inside it -- instead of a narrow capture per icon
-        # EN: (fragile as soon as the buff bar reorders and shifts the icons).
-        buff_frame = capturer.grab(regions["buff_bar"])
-        state.buffs["spirited_vortex"] = matcher.is_match(buff_frame, "spirited_vortex")
-        state.buffs["spirited_strikes"] = matcher.is_match(buff_frame, "spirited_strikes")
-        state.debuffs["warden_of_the_temple_3"] = matcher.is_match(buff_frame, "warden_of_the_temple_3")
+    snapshot_box = {"latest": MeikoDetectionSnapshot()}
+    stop_event = threading.Event()
+    worker_thread = threading.Thread(
+        target=_run_meiko_detection_worker, args=(regions, snapshot_box, stop_event),
+        daemon=True, name="meiko-detection-worker",
+    )
+    worker_thread.start()
 
-        state.resources["stormfall"] = 1.0 if matcher.is_match(
-            capturer.grab(regions["stormfall_lit"]), "stormfall_lit"
-        ) else 0.0
+    def state_update_fn(state: CombatState) -> None:
+        snap = snapshot_box["latest"]
+        state.buffs["spirited_vortex"] = snap.spirited_vortex
+        state.buffs["spirited_strikes"] = snap.spirited_strikes
+        state.debuffs["warden_of_the_temple_3"] = snap.warden_of_the_temple_3
+        state.resources["stormfall"] = snap.stormfall
+        if snap.spirited_strikes_remaining_s is not None:
+            state.resources["spirited_strikes_remaining_s"] = snap.spirited_strikes_remaining_s
+        elif not snap.spirited_strikes:
+            # Buff absent -> pas de compte à rebours à lire, on efface la
+            # dernière valeur connue pour ne pas laisser une valeur périmée
+            # déclencher un refresh proactif à tort.
+            # EN: Buff absent -> no countdown to read, clear the last known
+            # EN: value so a stale value doesn't wrongly trigger a proactive
+            # EN: refresh.
+            state.resources.pop("spirited_strikes_remaining_s", None)
         # earthfall_lit pas encore capturé -> state.resources["earthfall"] reste
         # à son défaut (0.0 via .get()) tant que le template n'existe pas.
         # EN: earthfall_lit not captured yet -> state.resources["earthfall"]
         # EN: stays at its default (0.0 via .get()) while the template doesn't
         # EN: exist.
+
+        # Fraîcheur (Phase 0, 2026-07-14) : copie les horodatages du snapshot
+        # dans state.detection_meta, SÉPARÉMENT des valeurs détectées
+        # ci-dessus (cf. CombatState::detection_meta, engine.py). ocr n'est
+        # copié QUE s'il a déjà eu lieu au moins une fois (cf.
+        # MeikoDetectionSnapshot.ocr_created_at, None tant que jamais lu).
+        # EN: Freshness (Phase 0, 2026-07-14): copies the snapshot's
+        # EN: timestamps into state.detection_meta, SEPARATELY from the
+        # EN: detected values above (cf. CombatState::detection_meta,
+        # EN: engine.py). ocr is only copied IF it has happened at least once
+        # EN: (cf. MeikoDetectionSnapshot.ocr_created_at, None as long as never
+        # EN: read).
+        state.detection_meta["meiko_yolo"] = DetectionMeta(created_at=snap.yolo_created_at)
+        if snap.ocr_created_at is not None:
+            state.detection_meta["meiko_ocr"] = DetectionMeta(created_at=snap.ocr_created_at)
 
     return state_update_fn
 
@@ -168,15 +428,16 @@ RAGE_BAR_FILL_BGR = (7, 0, 128)   # BGR, rouge · EN: BGR, red
 # fait jamais qu'un COPIER ces valeurs dans state.debuffs/buffs/resources/flags
 # -- jamais de calcul lourd dans le tick de l'engine.
 #
-# IMPORTANT (séparation des responsabilités) : state.flags contient un
-# mélange de clés possédées par LA DÉTECTION (hammer_storm_casting -- mise à
-# jour ici) et de clés possédées par LES HOOKS (hammer_storm_proc_ready, tous
-# les _..._prev/_..._absent_ticks -- mises à jour dans
-# tariq_pre_tick/post_tick, thread principal). state_update_fn (léger,
-# ci-dessous) ne touche QUE les clés de détection, jamais par un
-# remplacement en bloc du dict -- un remplacement complet écraserait les
-# clés des hooks et reproduirait exactement le genre de bug de
-# désynchronisation déjà vu avec warden_stacks (cf. hooks.py).
+# IMPORTANT (séparation des responsabilités) : AVANT la migration CombatState
+# (2026-07-14), state.flags était un seul dict fourre-tout mélangeant des clés
+# possédées par LA DÉTECTION (hammer_storm_casting -- mise à jour ici) et des
+# clés possédées par LES HOOKS (hammer_storm_proc_ready, tous les
+# _..._prev/_..._absent_ticks -- mises à jour dans tariq_pre_tick/post_tick,
+# thread principal), avec pour seule garantie un commentaire "ne jamais
+# écraser en bloc". C'est maintenant STRUCTUREL : state.detection et
+# state.hooks sont deux dicts distincts, state_update_fn (léger, ci-dessous)
+# n'écrit QUE dans state.detection (hammer_storm_casting) -- il ne peut plus,
+# même par erreur, écraser une clé possédée par les hooks (cf. hooks.py).
 # EN: BUG FOUND IN-GAME (2026-07-12): even after the enclosing capture (~14ms)
 # EN: and the loosened YOLO throttle, ~1 tick in 4 stays above the 30Hz budget
 # EN: (33ms) when the YOLO throttle re-triggers (~25-30ms more). Architectural
@@ -190,14 +451,16 @@ RAGE_BAR_FILL_BGR = (7, 0, 128)   # BGR, rouge · EN: BGR, red
 # EN: state.debuffs/buffs/resources/flags -- never any heavy computation in the
 # EN: engine tick.
 # EN:
-# EN: IMPORTANT (separation of responsibilities): state.flags holds a mix of
+# EN: IMPORTANT (separation of responsibilities): BEFORE the CombatState
+# EN: migration (2026-07-14), state.flags was a single catch-all dict mixing
 # EN: keys owned by DETECTION (hammer_storm_casting -- updated here) and keys
 # EN: owned by THE HOOKS (hammer_storm_proc_ready, all the
 # EN: _..._prev/_..._absent_ticks -- updated in tariq_pre_tick/post_tick, main
-# EN: thread). state_update_fn (lightweight, below) only touches the detection
-# EN: keys, never via a wholesale replacement of the dict -- a full replacement
-# EN: would overwrite the hooks' keys and reproduce exactly the kind of desync
-# EN: bug already seen with warden_stacks (cf. hooks.py).
+# EN: thread), with only a comment "never overwrite wholesale" as a guarantee.
+# EN: This is now STRUCTURAL: state.detection and state.hooks are two distinct
+# EN: dicts, state_update_fn (lightweight, below) only writes into
+# EN: state.detection (hammer_storm_casting) -- it can no longer, even by
+# EN: mistake, overwrite a key owned by the hooks (cf. hooks.py).
 TARIQ_DETECTION_WORKER_HZ = 15.0   # cf. suggestion "8-15Hz" -- capture+matching tient largement dans ce budget (~15ms sur ~67ms) · EN: cf. the "8-15Hz" suggestion -- capture+matching fits amply in this budget (~15ms out of ~67ms)
 
 # VOILE GCD (2026-07-14, cf. discussion "voile noir décroissant qui
@@ -259,6 +522,24 @@ class TariqDetectionSnapshot:
     veil_culling_strike: bool = False        # off_gcd -- voile propre à SON cooldown (4.44s) · EN: off_gcd -- veil tied to ITS OWN cooldown (4.44s)
     veil_thunder_call: bool = False          # off_gcd -- voile propre à SON cooldown (43s) · EN: off_gcd -- veil tied to ITS OWN cooldown (43s)
     veil_focused_wrath: bool = False         # off_gcd -- voile propre à SON cooldown (86s) · EN: off_gcd -- veil tied to ITS OWN cooldown (86s)
+    # Fraîcheur (Phase 0, 2026-07-14) : 2 horodatages -- created_at pour tout
+    # ce qui est rafraîchi À CHAQUE cycle du thread (cast_bar/rage_bar/
+    # culling_strike/voiles GCD, cf. TARIQ_BARS_FRESHNESS_POLICY plus haut) ;
+    # yolo_created_at spécifiquement pour les 3 buffs YOLO (throttlés
+    # indépendamment, ~150ms, cf. TARIQ_YOLO_FRESHNESS_POLICY). Mutable comme
+    # le reste de ce dataclass -- cf. commentaire équivalent sur
+    # MeikoDetectionSnapshot plus haut (même raison : construction
+    # incrémentale avant publication atomique, frozen=True casserait ça).
+    # EN: Freshness (Phase 0, 2026-07-14): 2 timestamps -- created_at for
+    # EN: everything refreshed on EVERY thread cycle (cast_bar/rage_bar/
+    # EN: culling_strike/GCD veils, cf. TARIQ_BARS_FRESHNESS_POLICY above);
+    # EN: yolo_created_at specifically for the 3 YOLO buffs (throttled
+    # EN: independently, ~150ms, cf. TARIQ_YOLO_FRESHNESS_POLICY). Mutable like
+    # EN: the rest of this dataclass -- cf. the equivalent comment on
+    # EN: MeikoDetectionSnapshot above (same reason: incremental construction
+    # EN: before atomic publication, frozen=True would break that).
+    created_at: float = 0.0
+    yolo_created_at: float = 0.0
 
 
 def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher, regions: dict):
@@ -289,7 +570,7 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
     décroît donc bien avec le temps (~1.0 en début de cast, ~0.0 juste avant
     la fin), mais l'ALGORITHME DE SCAN doit partir de la gauche comme une
     barre classique -- ne pas remettre "rtl" ici, ça a été testé et corrigé.
-    Alimente state.flags["hammer_storm_casting"], lu par tariq_pre_tick
+    Alimente state.detection["hammer_storm_casting"], lu par tariq_pre_tick
     (hooks.py) pour verrouiller TOUTE presse (même off_gcd) pendant que ça
     caste -- Hammer Storm est la source de dégâts principale et ne doit
     jamais être coupée.
@@ -350,7 +631,7 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
     EN: frame on a Game Bar clip). The read value thus decreases over time (~1.0
     EN: at cast start, ~0.0 just before the end), but the SCAN ALGORITHM must
     EN: start from the left like a classic bar -- do not set "rtl" here, that was
-    EN: tested and fixed. Feeds state.flags["hammer_storm_casting"], read by
+    EN: tested and fixed. Feeds state.detection["hammer_storm_casting"], read by
     EN: tariq_pre_tick (hooks.py) to lock EVERY press (even off_gcd) while it
     EN: casts -- Hammer Storm is the main damage source and must never be cut.
     EN:
@@ -659,6 +940,19 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
         snap.veil_focused_wrath = _read_icon_veiled(base_frame, "focused_wrath", _icon_now)
         stages["icon_veil_read_ms"] = (time.monotonic() - _t0) * 1000
 
+        # Fraîcheur (Phase 0, 2026-07-14) : réutilise last_yolo_detect["t"]
+        # (déjà suivi plus haut pour le throttle YOLO lui-même) -- reste à 0.0
+        # tant qu'aucun appel YOLO n'a jamais eu lieu cette session, ce qui
+        # donne naturellement un âge énorme (EXPIRED) sans traitement
+        # spécial, cf. wardenbot/freshness.py.
+        # EN: Freshness (Phase 0, 2026-07-14): reuses last_yolo_detect["t"]
+        # EN: (already tracked above for the YOLO throttle itself) -- stays at
+        # EN: 0.0 as long as no YOLO call has ever happened this session, which
+        # EN: naturally yields a huge age (EXPIRED) with no special handling,
+        # EN: cf. wardenbot/freshness.py.
+        snap.created_at = _icon_now
+        snap.yolo_created_at = last_yolo_detect["t"]
+
         snapshot_box["latest"] = snap   # publication atomique -- jamais de mutation en place · EN: atomic publication -- never an in-place mutation
 
         _cycle_dur = time.monotonic() - _cycle_t0
@@ -770,22 +1064,22 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
     # state_update_fn (thread principal, appelé à chaque tick de l'engine) :
     # ne fait plus AUCUNE capture/détection -- juste une copie des dernières
     # valeurs connues (snapshot_box["latest"], publiées par le thread
-    # détection ci-dessus). Copie clé par clé, JAMAIS state.flags = {...} en
-    # bloc -- cf. commentaire au-dessus de TariqDetectionSnapshot : state.flags
-    # contient aussi des clés possédées par les hooks (hammer_storm_proc_ready,
-    # etc.) qu'un remplacement complet écraserait.
+    # détection ci-dessus). Copie clé par clé dans state.detection -- ce dict
+    # n'est écrit QUE par ce thread (cf. CombatState, engine.py) ; les clés des
+    # hooks (hammer_storm_proc_ready, etc.) vivent dans state.hooks, un dict
+    # séparé qu'aucun remplacement en bloc ici ne peut plus écraser.
     # EN: state_update_fn (main thread, called every engine tick): does NO more
     # EN: capture/detection -- just a copy of the latest known values
     # EN: (snapshot_box["latest"], published by the detection thread above).
-    # EN: Copy key by key, NEVER state.flags = {...} wholesale -- cf. the comment
-    # EN: above TariqDetectionSnapshot: state.flags also holds keys owned by the
-    # EN: hooks (hammer_storm_proc_ready, etc.) that a full replacement would
-    # EN: overwrite.
-    def state_update_fn(state: State) -> None:
+    # EN: Copy key by key into state.detection -- this dict is written ONLY by
+    # EN: this thread (cf. CombatState, engine.py); the hooks' keys
+    # EN: (hammer_storm_proc_ready, etc.) live in state.hooks, a separate dict
+    # EN: that no wholesale replacement here can overwrite anymore.
+    def state_update_fn(state: CombatState) -> None:
         snap = snapshot_box["latest"]
         state.debuffs["culling_strike_dim"] = snap.culling_strike_dim
         state.resources["hammer_storm_cast_pct"] = snap.hammer_storm_cast_pct
-        state.flags["hammer_storm_casting"] = snap.hammer_storm_casting
+        state.detection["hammer_storm_casting"] = snap.hammer_storm_casting
         state.buffs["hammer_storm_empowered"] = snap.hammer_storm_empowered
         state.buffs["skull_crusher_empowered"] = snap.skull_crusher_empowered
         state.buffs["focused_wrath_empowered"] = snap.focused_wrath_empowered
@@ -794,5 +1088,16 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
         state.buffs["veil_culling_strike"] = snap.veil_culling_strike
         state.buffs["veil_thunder_call"] = snap.veil_thunder_call
         state.buffs["veil_focused_wrath"] = snap.veil_focused_wrath
+
+        # Fraîcheur (Phase 0, 2026-07-14) : cf. commentaire équivalent côté
+        # Meiko plus haut -- created_at couvre tout ce qui est lu à chaque
+        # cycle (bars/culling_strike/voiles GCD), yolo_created_at les 3 buffs
+        # YOLO spécifiquement (throttlés indépendamment).
+        # EN: Freshness (Phase 0, 2026-07-14): cf. the equivalent comment on
+        # EN: the Meiko side above -- created_at covers everything read every
+        # EN: cycle (bars/culling_strike/GCD veils), yolo_created_at the 3 YOLO
+        # EN: buffs specifically (throttled independently).
+        state.detection_meta["tariq_bars"] = DetectionMeta(created_at=snap.created_at)
+        state.detection_meta["tariq_yolo"] = DetectionMeta(created_at=snap.yolo_created_at)
 
     return state_update_fn

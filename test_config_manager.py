@@ -64,7 +64,12 @@ def test_tariq_keybinds_match_known_pre_migration_values():
 
 def test_meiko_regions_and_keybinds_match_known_pre_migration_values():
     config = ConfigManager("meiko")
-    assert config.get_region("buff_bar") == {"left": 2096, "top": 1183, "width": 223, "height": 47}
+    # buff_bar recalibrée le 2026-07-15 : l'utilisateur a aligné l'UI de Meiko sur celle
+    # de Tariq (import de string UI Fellowship) -- ancienne valeur (2096,1183,223,47)
+    # obsolète, remplacée par la même zone que tariq_buff_bar (970,1280,350,150),
+    # cf. templates/meiko/spirited_vortex.png/spirited_strikes.png/warden_of_the_temple_3.png
+    # recapturés dans la foulée sur cette même vidéo.
+    assert config.get_region("buff_bar") == {"left": 970, "top": 1280, "width": 350, "height": 150}
     assert config.get_key("fighting_techniques") == "4"
     print("ConfigManager('meiko') : régions/touches identiques aux valeurs de référence pré-migration.")
 

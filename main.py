@@ -63,11 +63,12 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
 from wardenbot.capture import ScreenCapture
 from wardenbot.config_manager import ConfigManager, list_profiles, validate_profile
 from wardenbot.diagnostics import check_foreground_window, log_error
-from wardenbot.engine import RotationEngine, State, load_abilities
+from wardenbot.engine import CombatState, RotationEngine, load_abilities, load_weight_overrides, parse_sequences
 from wardenbot.game_config import CHARACTERS
 from wardenbot.input_sim import InputSimulator, InputWorker
 from wardenbot.matcher import TemplateMatcher
 from wardenbot.state_update import TARIQ_BUFF_BAR_THRESHOLDS  # noqa: F401 -- re-exporté, cf. build_yolo_dataset.py
+from wardenbot.telemetry import TelemetryWorker
 
 DEBUG_LOG_PATH = Path("debug.log")
 
@@ -84,7 +85,7 @@ REGIONS = {name: cm.regions for name, cm in _CONFIG_MANAGERS.items()}
 KEY_MAP = {name: cm.keybinds for name, cm in _CONFIG_MANAGERS.items()}
 
 
-def make_debug_logger(state: State) -> Callable[[Optional[str]], None]:
+def make_debug_logger(state: CombatState) -> Callable[[Optional[str]], None]:
     """
     Écrit une ligne dans debug.log (écrasé à chaque lancement) à chaque tick
     où quelque chose a changé : une touche pressée, ou l'état buffs/debuffs/
@@ -111,10 +112,15 @@ def make_debug_logger(state: State) -> Callable[[Optional[str]], None]:
             "buffs": dict(state.buffs),
             "debuffs": dict(state.debuffs),
             "resources": dict(state.resources),
-            # Tout state.flags plutôt qu'un champ Meiko codé en dur
-            # (warden_stacks) -- generique pour marcher pareil avec les
-            # flags de proc de Tariq (hammer_storm_proc_ready, etc.).
-            "flags": dict(state.flags),
+            # Tout state.detection/hooks/planner plutôt qu'un champ Meiko codé
+            # en dur (warden_stacks) -- generique pour marcher pareil avec les
+            # clés de proc de Tariq (hammer_storm_proc_ready, etc.). 3 clés
+            # distinctes (2026-07-14, migration CombatState) au lieu d'un seul
+            # "flags" fourre-tout -- même contenu, juste rangé par propriétaire
+            # (cf. wardenbot/engine.py::CombatState).
+            "detection": dict(state.detection),
+            "hooks": dict(state.hooks),
+            "planner": dict(state.planner),
             "locks": {
                 "gcd_remaining_s": round(state.gcd_until - now, 3),
                 "hard_lock_remaining_s": round(state.hard_lock_until - now, 3),
@@ -132,20 +138,21 @@ def make_debug_logger(state: State) -> Callable[[Optional[str]], None]:
         # contient des durées qui changent à chaque tick (ex: "cooldown actif
         # encore 0.38s"), l'inclure dans la comparaison anéantirait le dedup
         # (jamais deux ticks identiques). Affiché seulement quand pressed est
-        # None -- cf. State.debug_skip_trace (engine.py), rempli par
+        # None -- cf. CombatState.debug_skip_trace (engine.py), rempli par
         # _pick_ability : pourquoi CHAQUE ability a été écartée ce tick.
         skip_trace = state.debug_skip_trace if pressed is None else []
         # choice_reason (2026-07-14, audit rotation/stabilité) : symétrique de
         # skip_trace -- répond à "pourquoi X A gagné" quand pressed n'est PAS
         # None, là où skip_trace répondait déjà à "pourquoi pas X" quand rien
-        # n'est pressé. cf. State.debug_choice_reason (engine.py), rempli par
+        # n'est pressé. cf. CombatState.debug_choice_reason (engine.py), rempli par
         # _pick_ability (ou le pre_tick_hook quand il court-circuite le scan).
         choice_reason = state.debug_choice_reason if pressed is not None else ""
         line = (
             f"{time.strftime('%H:%M:%S')} "
             f"pressed={pressed!r} last_cast={state.last_cast!r} "
             f"buffs={snapshot['buffs']} debuffs={snapshot['debuffs']} "
-            f"resources={snapshot['resources']} flags={snapshot['flags']} "
+            f"resources={snapshot['resources']} detection={snapshot['detection']} "
+            f"hooks={snapshot['hooks']} planner={snapshot['planner']} "
             f"locks={snapshot['locks']} cooldowns_remaining_s={snapshot['cooldowns_remaining_s']} "
             f"skip_trace={skip_trace} choice_reason={choice_reason!r}\n"
         )
@@ -158,9 +165,9 @@ def make_debug_logger(state: State) -> Callable[[Optional[str]], None]:
 VK_F9 = 0x78
 
 
-def make_debug_reset_hotkey(state: State) -> Callable[[], None]:
+def make_debug_reset_hotkey(state: CombatState) -> Callable[[], None]:
     """
-    F9 en jeu : remet state.flags["warden_stacks"] à 0 à la main. Sert de
+    F9 en jeu : remet state.hooks["warden_stacks"] à 0 à la main. Sert de
     secours si le compteur de stacks Warden of the Temple (cf. hooks.py) se
     désynchronise de l'état réel -- typiquement si tu relances le bot en
     plein combat alors que des stacks étaient déjà posées avant.
@@ -171,8 +178,8 @@ def make_debug_reset_hotkey(state: State) -> Callable[[], None]:
         nonlocal pressed_last
         down = bool(ctypes.windll.user32.GetAsyncKeyState(VK_F9) & 0x8000)
         if down and not pressed_last:
-            state.flags["warden_stacks"] = 0
-            state.flags.pop("warden_stacks_since", None)
+            state.hooks["warden_stacks"] = 0
+            state.hooks.pop("warden_stacks_since", None)
             print("[main] F9 -- warden_stacks remis à 0 manuellement")
         pressed_last = down
 
@@ -221,7 +228,9 @@ def make_pause_toggle(on_toggle: Optional[Callable[[bool], None]] = None) -> tup
     return is_paused, check_toggle_hotkey
 
 
-def build_engine(character: str, dry_run: bool = True, profile: Optional[str] = None) -> RotationEngine:
+def build_engine(
+    character: str, dry_run: bool = True, profile: Optional[str] = None, enable_telemetry: bool = False
+) -> RotationEngine:
     cfg = CHARACTERS[character]
     # PHASE 1 industrialisation (2026-07-14) : le moteur ne connaît plus les
     # coordonnées -- il passe par ConfigManager.
@@ -243,7 +252,47 @@ def build_engine(character: str, dry_run: bool = True, profile: Optional[str] = 
         validate_profile(config, required_regions=cfg.get("required_regions"))
 
     abilities, meta = load_abilities(cfg["config"])
-    state = State(mode=cfg["default_mode"])
+    # Phase 3 (2026-07-14) : bloc `sequences:` optionnel, déjà exposé tel
+    # quel dans `meta` par load_abilities (clé "sequences" du YAML, comme
+    # n'importe quelle autre clé de haut niveau hors `abilities:`) -- absent
+    # pour Tariq aujourd'hui, donc parse_sequences(None) -> [] et
+    # RotationEngine se comporte à l'identique d'avant cette migration.
+    # EN: Phase 3 (2026-07-14): optional `sequences:` block, already exposed
+    # EN: as-is in `meta` by load_abilities (the YAML's "sequences" key, like
+    # EN: any other top-level key outside `abilities:`) -- absent for Tariq
+    # EN: today, so parse_sequences(None) -> [] and RotationEngine behaves
+    # EN: identically to before this migration.
+    sequences = parse_sequences(meta.get("sequences"))
+    state = CombatState(mode=cfg["default_mode"])
+
+    # Phase 4 (2026-07-14, télémétrie + tuning appris) : les DEUX sont
+    # opt-in, jamais automatiques.
+    #   - weight_overrides : lu à chaque démarrage depuis kb/combat_tuning.json
+    #     (cf. wardenbot/kb_engine.py) -- absent tant que l'utilisateur n'a rien
+    #     approuvé (cf. "human-in-the-loop") -> {} -> comportement identique
+    #     à avant cette fonctionnalité, MÊME hors dry_run.
+    #   - telemetry : enable_telemetry=False par défaut -- ne construit/
+    #     démarre un TelemetryWorker (thread + fichier) QUE si explicitement
+    #     demandé, jamais par RotationEngine lui-même (cf.
+    #     wardenbot/telemetry.py, docstring module -- sinon chaque
+    #     RotationEngine() de test ouvrirait un fichier).
+    # EN: Phase 4 (2026-07-14, telemetry + learned tuning): BOTH are opt-in,
+    # EN: never automatic.
+    # EN:   - weight_overrides: read at every startup from
+    # EN:     kb/combat_tuning.json (cf. wardenbot/kb_engine.py) -- absent as
+    # EN:     long as the user hasn't approved anything (cf. "human-in-the-loop")
+    # EN:     -> {} -> behavior identical to before this feature, EVEN outside
+    # EN:     dry_run.
+    # EN:   - telemetry: enable_telemetry=False by default -- only builds/
+    # EN:     starts a TelemetryWorker (thread + file) IF explicitly requested,
+    # EN:     never by RotationEngine itself (cf. wardenbot/telemetry.py,
+    # EN:     module docstring -- otherwise every test's RotationEngine()
+    # EN:     would open a file).
+    weight_overrides = load_weight_overrides()
+    telemetry = None
+    if enable_telemetry:
+        telemetry = TelemetryWorker()
+        telemetry.start()
 
     matcher = TemplateMatcher(cfg["templates"])
     capturer = ScreenCapture() if not dry_run else None
@@ -310,6 +359,9 @@ def build_engine(character: str, dry_run: bool = True, profile: Optional[str] = 
         pre_tick_hook=cfg["pre_tick_hook"],
         post_tick_hook=cfg["post_tick_hook"],
         state_update_fn=state_update_fn,
+        sequences=sequences,
+        telemetry=telemetry,
+        weight_overrides=weight_overrides,
     )
     if "off_gcd_hook_abilities" in cfg:
         engine_kwargs["off_gcd_hook_abilities"] = cfg["off_gcd_hook_abilities"]
@@ -387,10 +439,24 @@ if __name__ == "__main__":
     print(f"[main] DPI awareness : {DPI_AWARENESS_LEVEL}")
     character = choose_character()
     profile = choose_profile()
-    engine = build_engine(character, dry_run=False, profile=profile)  # mettre dry_run à True pour tester sans presser de touches
+    # enable_telemetry=True (2026-07-14, Phase 4) : journal de décisions
+    # (telemetry.jsonl, cf. wardenbot/telemetry.py) actif par défaut en
+    # conditions réelles -- c'est la matière première de
+    # wardenbot/kb_engine.py, qui n'a de valeur qu'avec des sessions
+    # réellement enregistrées. Mets à False ici si tu ne veux pas l'écriture
+    # disque associée pour une session donnée.
+    # EN: enable_telemetry=True (2026-07-14, Phase 4): decision journal
+    # EN: (telemetry.jsonl, cf. wardenbot/telemetry.py) active by default under
+    # EN: real conditions -- it's the raw material for wardenbot/kb_engine.py,
+    # EN: which only has value with genuinely recorded sessions. Set to False
+    # EN: here if you don't want the associated disk writes for a given
+    # EN: session.
+    engine = build_engine(character, dry_run=False, profile=profile, enable_telemetry=True)  # mettre dry_run à True pour tester sans presser de touches
     print(f"[main] Personnage : {character}")
     print(f"[main] Profil : {profile or 'Default'}")
     print(f"[main] debug -> {DEBUG_LOG_PATH.resolve()}")
+    if engine.telemetry is not None:
+        print(f"[main] télémétrie -> {engine.telemetry.log_file.resolve()}")
     print("[main] C = pause/reprise rotation -- F9 = reset manuel warden_stacks")
 
     log_tick = make_debug_logger(engine.state)
@@ -404,4 +470,17 @@ if __name__ == "__main__":
         check_pause_hotkey()
 
     tick_hz = CHARACTERS[character].get("tick_hz", 30.0)
-    engine.run_forever(tick_hz=tick_hz, on_tick=on_tick, is_paused=is_paused, on_error=on_error)
+    try:
+        engine.run_forever(tick_hz=tick_hz, on_tick=on_tick, is_paused=is_paused, on_error=on_error)
+    finally:
+        # Vide la queue de télémétrie avant de quitter (cf.
+        # wardenbot/telemetry.py::TelemetryWorker.stop) -- sans ça, les
+        # toutes dernières décisions de la session pourraient ne jamais être
+        # écrites (thread daemon tué au process exit).
+        # EN: Drains the telemetry queue before exiting (cf.
+        # EN: wardenbot/telemetry.py::TelemetryWorker.stop) -- without this,
+        # EN: the session's very last decisions could never be written (daemon
+        # EN: thread killed at process exit).
+        if engine.telemetry is not None:
+            engine.telemetry.stop()
+2

@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from wardenbot.bar_reader import read_fill_pct
-from wardenbot.engine import Ability, RotationEngine, State, evaluate_condition, load_abilities
+from wardenbot.engine import Ability, CombatState, RotationEngine, evaluate_condition, load_abilities
 from wardenbot.hooks import (
     BURST_PREP_WINDOW_S,
     BURST_TIMEOUT_MARGIN_S,
@@ -27,16 +27,16 @@ from wardenbot.hooks import (
 
 
 def test_ready_flag_arms_only_on_rising_edge():
-    state = State()
+    state = CombatState()
 
     # Buff absent -> jamais prêt.
     tariq_pre_tick(state)
-    assert state.flags.get("hammer_storm_proc_ready") is None
+    assert state.hooks.get("hammer_storm_proc_ready") is None
 
     # Absent -> présent : front montant -> prêt.
     state.buffs["hammer_storm_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is True
+    assert state.hooks["hammer_storm_proc_ready"] is True
     print("Front montant absent->présent -> ready=True")
 
 
@@ -46,20 +46,20 @@ def test_stuck_active_reading_does_not_rearm_after_consumption():
     JAMAIS repasser par 'not found'. Le fix ne doit pas redonner ready=True
     tant qu'aucune nouvelle transition n'a été vue, peu importe combien de
     ticks/casts s'écoulent."""
-    state = State()
+    state = CombatState()
 
     # Proc initial : absent -> présent -> prêt -> consommé par le cast.
     state.buffs["hammer_storm_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is True
+    assert state.hooks["hammer_storm_proc_ready"] is True
     tariq_post_tick(state, "hammer_storm_proc")
     # Confirmation : une vraie canalisation démarre (cf.
     # HAMMER_STORM_PROC_CONFIRM_WINDOW_S) -- SEULE cette confirmation efface
     # ready désormais, pas la simple presse.
-    state.flags["hammer_storm_casting"] = True
+    state.detection["hammer_storm_casting"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is False
-    state.flags["hammer_storm_casting"] = False
+    assert state.hooks["hammer_storm_proc_ready"] is False
+    state.detection["hammer_storm_casting"] = False
 
     # Le buff reste lu "actif" en continu sur ~90 ticks (cf. log du rapport),
     # avec d'autres abilities castées entre-temps (face_breaker, culling_strike
@@ -67,7 +67,7 @@ def test_stuck_active_reading_does_not_rearm_after_consumption():
     # nouvelle transition absent->présent.
     for _ in range(90):
         tariq_pre_tick(state)
-        assert state.flags["hammer_storm_proc_ready"] is False
+        assert state.hooks["hammer_storm_proc_ready"] is False
         tariq_post_tick(state, "face_breaker")
 
     print("90 ticks 'ACTIVE' bloqué sans transition -> ready reste False (plus de double-cast).")
@@ -86,30 +86,30 @@ def test_legitimate_rapid_reproc_still_fires():
     l'absence sur MIN_ABSENT_TICKS ticks, pas un seul, pour rester une
     absence "confirmée" plutôt qu'un blip."""
     from wardenbot.hooks import MIN_ABSENT_TICKS
-    state = State()
+    state = CombatState()
 
     # 1er proc.
     state.buffs["hammer_storm_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is True
+    assert state.hooks["hammer_storm_proc_ready"] is True
     tariq_post_tick(state, "hammer_storm_proc")
-    state.flags["hammer_storm_casting"] = True   # confirme le 1er cast (cf. test précédent)
+    state.detection["hammer_storm_casting"] = True   # confirme le 1er cast (cf. test précédent)
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is False
-    state.flags["hammer_storm_casting"] = False
+    assert state.hooks["hammer_storm_proc_ready"] is False
+    state.detection["hammer_storm_casting"] = False
 
     # Vraie retombée du buff (détectée "not found"), confirmée sur plusieurs
     # ticks consécutifs -- pas un blip d'1 frame.
     state.buffs["hammer_storm_empowered"] = False
     for _ in range(MIN_ABSENT_TICKS):
         tariq_pre_tick(state)
-        assert state.flags["hammer_storm_proc_ready"] is False
+        assert state.hooks["hammer_storm_proc_ready"] is False
 
     # Nouveau proc réel l'instant d'après (~1 GCD plus tard dans le vrai jeu,
     # mais rien ici ne dépend du temps écoulé) -> nouveau front montant.
     state.buffs["hammer_storm_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is True
+    assert state.hooks["hammer_storm_proc_ready"] is True
     print("Retombée réelle CONFIRMÉE puis nouveau proc quasi immédiat -> ready=True (re-proc légitime autorisé).")
 
 
@@ -120,23 +120,23 @@ def test_single_frame_noise_does_not_rearm_ready_flag():
     tort sur ce bruit, causant des hammer_storm_proc/skull_crusher_proc
     castés "sans proc" réel. Un SEUL tick d'absence (pas confirmé sur
     MIN_ABSENT_TICKS) ne doit PAS suffire à réarmer ready après consommation."""
-    state = State()
+    state = CombatState()
 
     state.buffs["hammer_storm_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is True
+    assert state.hooks["hammer_storm_proc_ready"] is True
     tariq_post_tick(state, "hammer_storm_proc")
-    state.flags["hammer_storm_casting"] = True
+    state.detection["hammer_storm_casting"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is False
-    state.flags["hammer_storm_casting"] = False
+    assert state.hooks["hammer_storm_proc_ready"] is False
+    state.detection["hammer_storm_casting"] = False
 
     # Un SEUL tick de bruit "absent" (pas confirmé) puis "présent" à nouveau.
     state.buffs["hammer_storm_empowered"] = False
     tariq_pre_tick(state)
     state.buffs["hammer_storm_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is False, "1 seul tick d'absence ne doit pas suffire à réarmer (bruit, pas un vrai proc)"
+    assert state.hooks["hammer_storm_proc_ready"] is False, "1 seul tick d'absence ne doit pas suffire à réarmer (bruit, pas un vrai proc)"
     print("1 tick de bruit isolé ne réarme pas ready -- filtré comme prévu.")
 
 
@@ -145,18 +145,18 @@ def test_skull_crusher_proc_mirrors_hammer_storm_pattern():
     quasi nul) que hammer_storm_proc dans Schism V2.yaml, mais SANS même le
     'not last:' d'origine -- même fix appliqué par analogie (cf. hooks.py),
     pas encore confirmé par des logs en jeu."""
-    state = State()
+    state = CombatState()
 
     state.buffs["skull_crusher_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["skull_crusher_proc_ready"] is True
+    assert state.hooks["skull_crusher_proc_ready"] is True
     tariq_post_tick(state, "skull_crusher_proc")
-    assert state.flags["skull_crusher_proc_ready"] is False
+    assert state.hooks["skull_crusher_proc_ready"] is False
 
     # Bloqué "actif" sur plusieurs ticks -> ne redevient pas prêt tout seul.
     for _ in range(10):
         tariq_pre_tick(state)
-        assert state.flags["skull_crusher_proc_ready"] is False
+        assert state.hooks["skull_crusher_proc_ready"] is False
     print("skull_crusher_proc : même comportement front-montant que hammer_storm_proc.")
 
 
@@ -164,17 +164,17 @@ def test_the_two_proc_flags_are_tracked_independently():
     """Un front montant sur hammer_storm_empowered ne doit pas armer
     skull_crusher_proc_ready, et inversement -- ce sont deux instances de
     buff totalement indépendantes."""
-    state = State()
+    state = CombatState()
 
     state.buffs["hammer_storm_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is True
-    assert state.flags.get("skull_crusher_proc_ready") is None
+    assert state.hooks["hammer_storm_proc_ready"] is True
+    assert state.hooks.get("skull_crusher_proc_ready") is None
 
     state.buffs["skull_crusher_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["skull_crusher_proc_ready"] is True
-    assert state.flags["hammer_storm_proc_ready"] is True  # pas touché par l'autre
+    assert state.hooks["skull_crusher_proc_ready"] is True
+    assert state.hooks["hammer_storm_proc_ready"] is True  # pas touché par l'autre
     print("Les deux flags de proc sont bien indépendants l'un de l'autre.")
 
 
@@ -211,7 +211,7 @@ def test_condition_per_mode_falls_back_to_generic_condition():
 def test_fury_above_condition_token():
     """Ressource nommée "fury" (pas "mana") -- confirmé par les tooltips en
     jeu ("25 Fury", "50 Fury" sur Skull Crusher/Hammer Storm)."""
-    state = State()
+    state = CombatState()
     state.resources["fury"] = 0.50
     assert evaluate_condition("fury_above:51", state) is False
     assert evaluate_condition("fury_above:50", state) is True
@@ -236,7 +236,7 @@ def test_chain_lightning_uses_normal_detection_with_only_fury_gate():
     assert "chain_lightning_dim" not in chain.condition, f"la condition ne doit plus référencer le debuff grisé, reçu {chain.condition!r}"
 
     # Seul le gate de Fury reste : bloquée au-dessus de 85%, libre en-dessous.
-    state = State()
+    state = CombatState()
     state.resources["fury"] = 0.90
     assert evaluate_condition(chain.condition, state) is False, "au-dessus de 85% Fury, chain_lightning doit être bloquée"
     state.resources["fury"] = 0.50
@@ -288,7 +288,7 @@ def test_hard_lock_blocks_even_off_gcd_abilities():
     sa canalisation -- même une off_gcd, qui bypasse normalement le gate de
     GCD classique (culling_strike, focused_wrath, thunder_call...). Le
     verrou hard_lock_until doit bloquer sans exception."""
-    state = State()
+    state = CombatState()
     state.hard_lock_until = time.monotonic() + 10.0  # verrouillé loin dans le futur
 
     ability = Ability(name="culling_strike", priority_st=0, off_gcd=True, skip_detection=True)
@@ -310,11 +310,11 @@ def test_hammer_storm_proc_fires_on_any_single_proc():
     doit partir dès que prête + fury suffisante, sur N'IMPORTE QUEL proc,
     QUE Focused Wrath soit up ou non."""
     abilities, meta = load_abilities("config/tariq.yaml")
-    state = State(mode="st")
+    state = CombatState(mode="st")
     state.resources["fury"] = 1.0
-    state.flags["hammer_storm_proc_ready"] = True
+    state.hooks["hammer_storm_proc_ready"] = True
     # Simule un état de jeu réaliste pour les trois autres off_gcd de
-    # priorité 0 (sinon un State() vierge les laisse "toujours prêtes" et
+    # priorité 0 (sinon un CombatState() vierge les laisse "toujours prêtes" et
     # elles gagnent le scan avant même d'atteindre hammer_storm_proc) :
     state.debuffs["culling_strike_dim"] = True  # cible pas sous 35% PV -> indisponible
     state.cooldown_until["thunder_call"] = time.monotonic() + 999.0  # déjà utilisée récemment (cooldown 43s)
@@ -352,39 +352,43 @@ def test_focused_wrath_discount_fires_hammer_storm_below_normal_threshold():
     hooks.py, marge ajoutée le 2026-07-13) + focused_wrath_empowered actif ->
     doit quand même partir, sinon le bot croit ne pas avoir assez de Fury
     pour un proc qu'il peut réellement se permettre."""
-    state = State()
+    state = CombatState()
     state.buffs["focused_wrath_empowered"] = True
-    state.flags["hammer_storm_proc_ready"] = True
+    state.hooks["hammer_storm_proc_ready"] = True
     state.resources["fury"] = 0.35
     assert state.resources["fury"] * 100 > HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED
-    pressed = tariq_pre_tick(state)
-    assert pressed == "hammer_storm_proc", f"attendu hammer_storm_proc au seuil réduit, reçu {pressed!r}"
+    pressed = tariq_pre_tick(state)   # cf. hooks.py::Intent -- liste, plus un nom nu
+    assert len(pressed) == 1 and pressed[0].ability == "hammer_storm_proc", (
+        f"attendu hammer_storm_proc au seuil réduit, reçu {pressed!r}"
+    )
     print("Focused Wrath actif (ex: Leap Smash) -> hammer_storm_proc part sous le seuil plein.")
 
 
 def test_focused_wrath_discount_does_not_fire_below_discounted_threshold():
     """Même le seuil RÉDUIT doit rester respecté -- Focused Wrath ne rend pas
     le proc gratuit, juste moins cher."""
-    state = State()
+    state = CombatState()
     state.buffs["focused_wrath_empowered"] = True
-    state.flags["hammer_storm_proc_ready"] = True
+    state.hooks["hammer_storm_proc_ready"] = True
     state.resources["fury"] = 0.10
     assert state.resources["fury"] * 100 < HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED
-    pressed = tariq_pre_tick(state)
-    assert pressed != "hammer_storm_proc", f"ne devrait pas partir sous le seuil réduit, reçu {pressed!r}"
+    pressed = tariq_pre_tick(state)   # cf. hooks.py::Intent -- liste, plus un nom nu
+    assert pressed == [], f"ne devrait pas partir sous le seuil réduit, reçu {pressed!r}"
     print("Focused Wrath actif mais Fury sous le seuil réduit -> hammer_storm_proc ne part pas.")
 
 
 def test_focused_wrath_discount_fires_skull_crusher_below_normal_threshold():
     """Même mécanisme que Hammer Storm -- Focused Wrath réduit aussi le coût
     de Skull Crusher (2 charges partagées entre les deux abilities)."""
-    state = State()
+    state = CombatState()
     state.buffs["focused_wrath_empowered"] = True
-    state.flags["skull_crusher_proc_ready"] = True
+    state.hooks["skull_crusher_proc_ready"] = True
     state.resources["fury"] = 0.15
     assert state.resources["fury"] * 100 > SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED
-    pressed = tariq_pre_tick(state)
-    assert pressed == "skull_crusher_proc", f"attendu skull_crusher_proc au seuil réduit, reçu {pressed!r}"
+    pressed = tariq_pre_tick(state)   # cf. hooks.py::Intent -- liste, plus un nom nu
+    assert len(pressed) == 1 and pressed[0].ability == "skull_crusher_proc", (
+        f"attendu skull_crusher_proc au seuil réduit, reçu {pressed!r}"
+    )
     print("Focused Wrath actif -> skull_crusher_proc part aussi sous son seuil réduit.")
 
 
@@ -392,25 +396,25 @@ def test_no_discount_without_focused_wrath_active():
     """Sans focused_wrath_empowered, le seuil réduit ne doit JAMAIS
     s'appliquer -- le hook ne force rien, le scan normal (fury_above:55
     plein, config/tariq.yaml) reste seul juge."""
-    state = State()
-    state.flags["hammer_storm_proc_ready"] = True
+    state = CombatState()
+    state.hooks["hammer_storm_proc_ready"] = True
     state.resources["fury"] = 0.30   # au-dessus du seuil réduit, en dessous du seuil plein
-    pressed = tariq_pre_tick(state)
-    assert pressed != "hammer_storm_proc", f"ne devrait pas forcer le proc sans Focused Wrath actif, reçu {pressed!r}"
+    pressed = tariq_pre_tick(state)   # cf. hooks.py::Intent -- liste, plus un nom nu
+    assert pressed == [], f"ne devrait pas forcer le proc sans Focused Wrath actif, reçu {pressed!r}"
     print("Pas de Focused Wrath actif -> pas de seuil réduit, le hook ne force rien.")
 
 
 def test_hammer_storm_casting_flag_refreshes_hard_lock():
     """tariq_pre_tick doit renouveler hard_lock_until tant que
-    state.flags['hammer_storm_casting'] est vrai (détection écran fraîche
+    state.detection['hammer_storm_casting'] est vrai (détection écran fraîche
     du tick), et NE PLUS le renouveler dès que ça repasse à False -- pas
     besoin de connaître la durée exacte du cast, juste de suivre l'état
     réel détecté à chaque tick (même principe que tout le reste de
     wardenbot : détecter, pas estimer)."""
-    state = State()
+    state = CombatState()
     now = time.monotonic()
 
-    state.flags["hammer_storm_casting"] = True
+    state.detection["hammer_storm_casting"] = True
     tariq_pre_tick(state)
     assert state.hard_lock_until > now, "le verrou doit être renouvelé pendant la canalisation"
 
@@ -421,11 +425,11 @@ def test_hammer_storm_casting_flag_refreshes_hard_lock():
     assert state.hard_lock_until >= locked_until_mid_cast
 
     # Canalisation terminée (détection repasse à False) -> plus de renouvellement.
-    state.flags["hammer_storm_casting"] = False
+    state.detection["hammer_storm_casting"] = False
     locked_until_end = state.hard_lock_until
     tariq_pre_tick(state)
     assert state.hard_lock_until == locked_until_end, "le verrou ne doit plus être repoussé une fois la canalisation terminée"
-    print("hard_lock_until suit bien state.flags['hammer_storm_casting'] tick par tick.")
+    print("hard_lock_until suit bien state.detection['hammer_storm_casting'] tick par tick.")
 
 
 def test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry():
@@ -445,26 +449,26 @@ def test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry():
     le prochain tick retente naturellement."""
     from wardenbot.hooks import HAMMER_STORM_PROC_CONFIRM_WINDOW_S
 
-    state = State()
+    state = CombatState()
     state.buffs["hammer_storm_empowered"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is True
+    assert state.hooks["hammer_storm_proc_ready"] is True
 
     tariq_post_tick(state, "hammer_storm_proc")
     # Toujours "en attente" juste après la presse -- ready pas encore jugé.
-    assert state.flags["_hammer_storm_proc_pending"] is True
+    assert state.hooks["_hammer_storm_proc_pending"] is True
 
     # Le jeu ne démarre JAMAIS de canalisation (Fury réelle insuffisante) --
     # hammer_storm_casting reste False tout du long. On avance le temps
     # au-delà de la fenêtre de confirmation sans jamais poser casting=True.
-    state.flags["_hammer_storm_proc_pending_since"] -= (HAMMER_STORM_PROC_CONFIRM_WINDOW_S + 0.1)
+    state.hooks["_hammer_storm_proc_pending_since"] -= (HAMMER_STORM_PROC_CONFIRM_WINDOW_S + 0.1)
     tariq_pre_tick(state)
 
-    assert state.flags["hammer_storm_proc_ready"] is True, (
+    assert state.hooks["hammer_storm_proc_ready"] is True, (
         "un press qui n'a mené à AUCUNE canalisation réelle ne doit pas "
         "consommer le proc -- sinon le bot croit à tort l'avoir utilisé"
     )
-    assert state.flags["_hammer_storm_proc_pending"] is False, "le marqueur d'attente doit être levé une fois la fenêtre expirée"
+    assert state.hooks["_hammer_storm_proc_pending"] is False, "le marqueur d'attente doit être levé une fois la fenêtre expirée"
     print("Press sans canalisation réelle confirmée -> ready reste True, retente possible au tick suivant.")
 
 
@@ -472,15 +476,15 @@ def test_hammer_storm_proc_press_with_real_cast_confirms_consumption():
     """Contre-exemple du test précédent : quand le jeu démarre réellement la
     canalisation (Fury suffisante, cast accepté), ready doit bien finir par
     passer à False -- la confirmation fonctionne, pas seulement le rejet."""
-    state = State()
+    state = CombatState()
     state.buffs["hammer_storm_empowered"] = True
     tariq_pre_tick(state)
     tariq_post_tick(state, "hammer_storm_proc")
-    assert state.flags["hammer_storm_proc_ready"] is True, "pas encore consommé avant confirmation"
+    assert state.hooks["hammer_storm_proc_ready"] is True, "pas encore consommé avant confirmation"
 
-    state.flags["hammer_storm_casting"] = True
+    state.detection["hammer_storm_casting"] = True
     tariq_pre_tick(state)
-    assert state.flags["hammer_storm_proc_ready"] is False, "la canalisation confirmée doit consommer le proc"
+    assert state.hooks["hammer_storm_proc_ready"] is False, "la canalisation confirmée doit consommer le proc"
     print("Press suivi d'une vraie canalisation détectée -> ready passe bien à False.")
 
 
@@ -502,23 +506,23 @@ def test_planner_stays_normal_when_no_burst_window_imminent():
     """Ni proche l'un de l'autre (>BURST_PREP_WINDOW_S), ni déjà simultanés :
     le Planner ne doit jamais entrer en prepare_burst sans raison -- pas de
     régression sur le comportement normal (aucune attente artificielle)."""
-    state = State()
+    state = CombatState()
     now = time.monotonic()
 
     # Les deux loin d'être prêts.
     state.cooldown_until["focused_wrath"] = now + 50.0
     state.cooldown_until["thunder_call"] = now + 50.0
     tariq_pre_tick(state)
-    assert state.flags["tariq_objective"] == "normal"
-    assert state.flags["burst_hold"] is False
+    assert state.planner["tariq_objective"] == "normal"
+    assert state.planner["burst_hold"] is False
 
     # Les deux DÉJÀ prêts en même temps -- pas besoin d'attendre, le scan
     # normal les prend l'un après l'autre sans intervention du planner.
     state.cooldown_until.pop("focused_wrath", None)
     state.cooldown_until.pop("thunder_call", None)
     tariq_pre_tick(state)
-    assert state.flags["tariq_objective"] == "normal"
-    assert state.flags["burst_hold"] is False
+    assert state.planner["tariq_objective"] == "normal"
+    assert state.planner["burst_hold"] is False
     print("Planner : reste 'normal' hors fenêtre d'anticipation et quand les deux sont déjà simultanés.")
 
 
@@ -530,13 +534,13 @@ def test_planner_holds_the_ready_cooldown_until_the_other_catches_up():
     preuve concrète que ça corrige l'écart de 22-27s mesuré dans debug.log."""
     from wardenbot.engine import load_abilities, evaluate_condition
 
-    state = State()
+    state = CombatState()
     now = time.monotonic()
     state.cooldown_until["focused_wrath"] = now + 5.0   # pas encore prêt, mais bientôt
 
     tariq_pre_tick(state)
-    assert state.flags["tariq_objective"] == "prepare_burst"
-    assert state.flags["burst_hold"] is True
+    assert state.planner["tariq_objective"] == "prepare_burst"
+    assert state.planner["burst_hold"] is True
 
     abilities, _ = load_abilities("config/tariq.yaml")
     by_name = {a.name: a for a in abilities}
@@ -551,17 +555,17 @@ def test_planner_releases_hold_once_both_are_ready():
     déclencher -- retour à 'normal' et burst_hold levé, le scan normal presse
     les deux (focused_wrath puis thunder_call, à un tick d'écart tout au
     plus, cf. tie-break par ordre de déclaration dans le YAML)."""
-    state = State()
+    state = CombatState()
     now = time.monotonic()
     state.cooldown_until["focused_wrath"] = now + 5.0
     tariq_pre_tick(state)
-    assert state.flags["tariq_objective"] == "prepare_burst"
+    assert state.planner["tariq_objective"] == "prepare_burst"
 
     # Les 5s se sont "écoulées" -- focused_wrath est maintenant prêt aussi.
     state.cooldown_until["focused_wrath"] = time.monotonic() - 0.01
     tariq_pre_tick(state)
-    assert state.flags["tariq_objective"] == "normal"
-    assert state.flags["burst_hold"] is False
+    assert state.planner["tariq_objective"] == "normal"
+    assert state.planner["burst_hold"] is False
     print("Planner : libère la retenue dès que les deux cooldowns sont prêts (burst déclenché).")
 
 
@@ -570,19 +574,19 @@ def test_planner_timeout_prevents_indefinite_hold():
     prévue (ex: Hammer Storm hard_lock a retardé toute la rotation pendant
     l'attente), le planner doit abandonner plutôt que de rester bloqué
     indéfiniment en prepare_burst."""
-    state = State()
+    state = CombatState()
     now = time.monotonic()
     state.cooldown_until["focused_wrath"] = now + 5.0
     tariq_pre_tick(state)
-    assert state.flags["tariq_objective"] == "prepare_burst"
+    assert state.planner["tariq_objective"] == "prepare_burst"
 
     # focused_wrath n'est TOUJOURS pas prêt (reste à now+5.0, dans le futur),
     # mais l'objectif a été pris il y a bien plus longtemps que la fenêtre +
     # sa marge -- le timeout doit forcer le retour à 'normal'.
-    state.flags["tariq_objective_since"] = time.monotonic() - (BURST_PREP_WINDOW_S + BURST_TIMEOUT_MARGIN_S + 0.1)
+    state.planner["tariq_objective_since"] = time.monotonic() - (BURST_PREP_WINDOW_S + BURST_TIMEOUT_MARGIN_S + 0.1)
     tariq_pre_tick(state)
-    assert state.flags["tariq_objective"] == "normal"
-    assert state.flags["burst_hold"] is False
+    assert state.planner["tariq_objective"] == "normal"
+    assert state.planner["burst_hold"] is False
     print("Planner : le timeout de sécurité débloque l'attente si ça dérive trop.")
 
 
@@ -598,15 +602,15 @@ def test_fury_conserve_blocks_only_discretionary_skull_crusher_filler():
     abilities, _ = load_abilities("config/tariq.yaml")
     by_name = {a.name: a for a in abilities}
 
-    state = State(mode="st")
+    state = CombatState(mode="st")
     state.resources["fury"] = 1.0
-    state.flags["fury_conserve"] = True
+    state.planner["fury_conserve"] = True
     assert evaluate_condition(by_name["skull_crusher"].condition_for("st"), state) is False, (
         "skull_crusher (dump discrétionnaire) doit être retenu pendant fury_conserve"
     )
 
-    state.flags["skull_crusher_proc_ready"] = True
-    state.flags["hammer_storm_proc_ready"] = True
+    state.hooks["skull_crusher_proc_ready"] = True
+    state.hooks["hammer_storm_proc_ready"] = True
     assert evaluate_condition(by_name["skull_crusher_proc"].condition_for("st"), state) is True
     assert evaluate_condition(by_name["hammer_storm_proc"].condition_for("st"), state) is True
 
@@ -631,16 +635,16 @@ def test_gcd_veil_confirms_a_tracked_press_as_success():
     original_path = diagnostics.PRESS_CONFIRM_LOG_PATH
     diagnostics.PRESS_CONFIRM_LOG_PATH = test_log
     try:
-        state = State()
+        state = CombatState()
         tariq_post_tick(state, "heavy_strike")
-        assert state.flags["_press_confirmations_pending"], "une confirmation doit être enregistrée pour une ability GCD trackée"
+        assert state.hooks["_press_confirmations_pending"], "une confirmation doit être enregistrée pour une ability GCD trackée"
 
         state.buffs["gcd_veil_active"] = True
         tariq_pre_tick(state)
 
         content = test_log.read_text()
         assert "heavy_strike" in content and "SUCCESS" in content
-        assert not state.flags["_press_confirmations_pending"], "la confirmation résolue doit être retirée de la liste d'attente"
+        assert not state.hooks["_press_confirmations_pending"], "la confirmation résolue doit être retirée de la liste d'attente"
     finally:
         diagnostics.PRESS_CONFIRM_LOG_PATH = original_path
         if test_log.exists():
@@ -661,16 +665,16 @@ def test_gcd_veil_timeout_flags_press_as_phantom():
     original_path = diagnostics.PRESS_CONFIRM_LOG_PATH
     diagnostics.PRESS_CONFIRM_LOG_PATH = test_log
     try:
-        state = State()
+        state = CombatState()
         tariq_post_tick(state, "wild_swing")
         # simule l'écoulement de la fenêtre de confirmation SANS jamais voir le voile.
-        state.flags["_press_confirmations_pending"][0]["requested_at_monotonic"] -= (PRESS_CONFIRM_WINDOW_S + 0.1)
+        state.hooks["_press_confirmations_pending"][0]["requested_at_monotonic"] -= (PRESS_CONFIRM_WINDOW_S + 0.1)
         state.buffs["gcd_veil_active"] = False
         tariq_pre_tick(state)
 
         content = test_log.read_text()
         assert "wild_swing" in content and "PHANTOM_PRESS" in content
-        assert not state.flags["_press_confirmations_pending"]
+        assert not state.hooks["_press_confirmations_pending"]
     finally:
         diagnostics.PRESS_CONFIRM_LOG_PATH = original_path
         if test_log.exists():
@@ -691,7 +695,7 @@ def test_off_gcd_veil_is_independent_from_shared_gcd_veil():
     original_path = diagnostics.PRESS_CONFIRM_LOG_PATH
     diagnostics.PRESS_CONFIRM_LOG_PATH = test_log
     try:
-        state = State()
+        state = CombatState()
         tariq_post_tick(state, "culling_strike")
         state.buffs["gcd_veil_active"] = False   # le GCD partagé ne bouge pas -- culling_strike ne le consomme pas
         state.buffs["veil_culling_strike"] = True
@@ -723,19 +727,19 @@ def test_press_confirmation_abandoned_not_phantom_after_pause_gap():
     original_path = diagnostics.PRESS_CONFIRM_LOG_PATH
     diagnostics.PRESS_CONFIRM_LOG_PATH = test_log
     try:
-        state = State()
+        state = CombatState()
         tariq_post_tick(state, "focused_wrath")
         tariq_pre_tick(state)   # 1er appel -- initialise _press_confirm_last_tick_at, rien à résoudre encore
-        assert state.flags["_press_confirmations_pending"]
+        assert state.hooks["_press_confirmations_pending"]
 
         # Simule une pause de plusieurs secondes (touche C) -- tariq_pre_tick
         # n'a PAS été appelé pendant ce temps, donc _press_confirm_last_tick_at
         # reste très en arrière par rapport à un vrai now() après la coupure.
-        state.flags["_press_confirm_last_tick_at"] -= 5.0
+        state.hooks["_press_confirm_last_tick_at"] -= 5.0
         state.buffs["veil_focused_wrath"] = False
         tariq_pre_tick(state)
 
-        assert not state.flags["_press_confirmations_pending"], "la confirmation doit être abandonnée, pas laissée en attente"
+        assert not state.hooks["_press_confirmations_pending"], "la confirmation doit être abandonnée, pas laissée en attente"
         content = test_log.read_text() if test_log.exists() else ""
         assert "PHANTOM_PRESS" not in content, "un écart type pause ne doit JAMAIS produire un faux PHANTOM_PRESS"
     finally:
@@ -753,9 +757,9 @@ def test_debug_choice_reason_explains_why_the_winner_beat_the_runner_up():
     state.debug_choice_reason avec sa priorité et le concurrent de priorité
     plus haute qu'il a devancé."""
     abilities, meta = load_abilities("config/tariq.yaml")
-    state = State(mode="st")
+    state = CombatState(mode="st")
     state.resources["fury"] = 1.0
-    state.flags["hammer_storm_proc_ready"] = True
+    state.hooks["hammer_storm_proc_ready"] = True
     state.debuffs["culling_strike_dim"] = True
     state.cooldown_until["thunder_call"] = time.monotonic() + 999.0
     state.cooldown_until["focused_wrath"] = time.monotonic() + 999.0

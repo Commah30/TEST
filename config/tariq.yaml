@@ -130,14 +130,16 @@ abilities:
   # EN: without a particular combo: off_gcd, no cost, and the Fury discount it
   # EN: grants (cf. hooks.py, HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED)
   # EN: benefits Hammer Storm/Skull Crusher as soon as it is up.
-  # not flag:burst_hold (2026-07-13) : câblage du Planner (cf. hooks.py,
-  # _update_tariq_planner) -- retenue si thunder_call est prêt mais pas
-  # encore elle, pour partir avec lui plutôt que 22-27s avant/après (écarts
-  # réels mesurés dans debug.log avant ce fix).
-  # EN: not flag:burst_hold (2026-07-13): Planner wiring (cf. hooks.py,
-  # EN: _update_tariq_planner) -- held back if thunder_call is ready but not
-  # EN: yet this one, to fire together rather than 22-27s apart (real gaps
-  # EN: measured in debug.log before this fix).
+  # not planner:burst_hold (2026-07-13, condition renommée 2026-07-14 --
+  # migration CombatState, flag:X -> planner:X) : câblage du Planner (cf.
+  # hooks.py, _update_tariq_planner) -- retenue si thunder_call est prêt mais
+  # pas encore elle, pour partir avec lui plutôt que 22-27s avant/après
+  # (écarts réels mesurés dans debug.log avant ce fix).
+  # EN: not planner:burst_hold (2026-07-13, condition renamed 2026-07-14 --
+  # EN: CombatState migration, flag:X -> planner:X): Planner wiring (cf.
+  # EN: hooks.py, _update_tariq_planner) -- held back if thunder_call is ready
+  # EN: but not yet this one, to fire together rather than 22-27s apart (real
+  # EN: gaps measured in debug.log before this fix).
   #
   # skip_detection: true (2026-07-13) : BUG TROUVÉ EN JEU -- c'était la seule
   # ability du kit (avec thunder_call) sans skip_detection, alors que
@@ -169,7 +171,7 @@ abilities:
     skip_detection: true
     cooldown_ms: 86000
     gcd_ms: 1
-    condition: not buff:focused_wrath_empowered, not flag:burst_hold
+    condition: not buff:focused_wrath_empowered, not planner:burst_hold
 
   # BUG TROUVÉ EN JEU (2026-07-12) : cooldown_ms:1 était inventé -- vrai
   # cooldown confirmé par l'utilisateur = 43s. En jeu réel avec l'ancienne valeur :
@@ -181,14 +183,16 @@ abilities:
   # EN: 707 presses in ~2 minutes (off_gcd + almost no brake = continuous spam
   # EN: at ~30Hz). Same root cause as culling_strike above: off_gcd bypasses
   # EN: the GCD, so ONLY cooldown_ms protects against spam.
-  # not flag:burst_hold (2026-07-13) : symétrique de focused_wrath ci-dessus
-  # -- retenue si focused_wrath est prêt mais pas encore elle. cf. hooks.py,
-  # _update_tariq_planner, pour la logique complète (fenêtre d'attente +
-  # timeout de sécurité).
-  # EN: not flag:burst_hold (2026-07-13): mirror of focused_wrath above --
-  # EN: held back if focused_wrath is ready but not yet this one. cf. hooks.py,
-  # EN: _update_tariq_planner, for the full logic (wait window + safety
-  # EN: timeout).
+  # not planner:burst_hold (2026-07-13, condition renommée 2026-07-14 --
+  # migration CombatState, flag:X -> planner:X) : symétrique de focused_wrath
+  # ci-dessus -- retenue si focused_wrath est prêt mais pas encore elle. cf.
+  # hooks.py, _update_tariq_planner, pour la logique complète (fenêtre
+  # d'attente + timeout de sécurité).
+  # EN: not planner:burst_hold (2026-07-13, condition renamed 2026-07-14 --
+  # EN: CombatState migration, flag:X -> planner:X): mirror of focused_wrath
+  # EN: above -- held back if focused_wrath is ready but not yet this one. cf.
+  # EN: hooks.py, _update_tariq_planner, for the full logic (wait window +
+  # EN: safety timeout).
   # skip_detection: true (2026-07-13) : même fix que focused_wrath ci-dessus,
   # par analogie (même structure, même absence de skip_detection jusqu'ici)
   # -- cooldown (43s) déjà confirmé par l'utilisateur, suffisant comme garde-fou.
@@ -203,7 +207,7 @@ abilities:
     skip_detection: true
     cooldown_ms: 43000
     gcd_ms: 1
-    condition: not flag:burst_hold
+    condition: not planner:burst_hold
 
   # BUG TROUVÉ EN JEU (2026-07-12), corrigé : "buff:focused_wrath_empowered"
   # rendait Hammer Storm OBLIGATOIREMENT dépendante de la fenêtre Focused
@@ -304,7 +308,7 @@ abilities:
     # EN (template): kept for reference -- no longer used for detection
     # EN: (skip_detection:true), only by REGIONS["tariq"]["hammer_storm_stack_badge"]/state-update.
     template: hammer_storm   # gardé pour référence -- plus utilisé pour la détection (skip_detection:true), seulement par REGIONS["tariq"]["hammer_storm_stack_badge"]/état-update
-    condition: fury_above:55, flag:hammer_storm_proc_ready
+    condition: fury_above:55, hooks:hammer_storm_proc_ready
 
   # BUG TROUVÉ EN JEU (2026-07-12) : priority_st était à égalité avec
   # heavy_strike (3 partout) -- au tie-break par ordre de déclaration
@@ -341,7 +345,7 @@ abilities:
     priority_aoe: 3
     skip_detection: true
     cooldown_ms: 1
-    condition: flag:skull_crusher_proc_ready, fury_above:23
+    condition: hooks:skull_crusher_proc_ready, fury_above:23
 
   # cooldown_ms:1 était un placeholder -- vrai cooldown confirmé par l'utilisateur :
   # 5.92s. Condition "not fury_above:76" retirée (2026-07-12) : l'utilisateur a
@@ -375,22 +379,24 @@ abilities:
     cooldown_ms: 5920
     skip_detection: true
 
-  # not flag:fury_conserve (2026-07-13) : câblage du Planner (cf. hooks.py) --
-  # c'est un DUMP DISCRÉTIONNAIRE de Fury (pas un proc, pas heavy_strike),
-  # retenu le temps que focused_wrath/thunder_call s'alignent pour un burst,
-  # afin d'arriver à ce moment avec le plus de Fury possible (fenêtre à coût
-  # réduit de 50% sur Hammer Storm/Skull Crusher). Les générateurs
-  # (face_breaker/chain_lightning/wild_swing) et les procs (hammer_storm_proc/
-  # skull_crusher_proc) ne sont volontairement PAS concernés par ce flag --
-  # cf. commentaire complet dans hooks.py.
-  # EN: not flag:fury_conserve (2026-07-13): Planner wiring (cf. hooks.py) --
-  # EN: this is a DISCRETIONARY Fury DUMP (not a proc, not heavy_strike), held
-  # EN: back while focused_wrath/thunder_call align for a burst, to arrive at
-  # EN: that moment with as much Fury as possible (50%-reduced-cost window on
-  # EN: Hammer Storm/Skull Crusher). The generators (face_breaker/
-  # EN: chain_lightning/wild_swing) and the procs (hammer_storm_proc/
-  # EN: skull_crusher_proc) are deliberately NOT affected by this flag -- cf.
-  # EN: the full comment in hooks.py.
+  # not planner:fury_conserve (2026-07-13, condition renommée 2026-07-14 --
+  # migration CombatState, flag:X -> planner:X) : câblage du Planner (cf.
+  # hooks.py) -- c'est un DUMP DISCRÉTIONNAIRE de Fury (pas un proc, pas
+  # heavy_strike), retenu le temps que focused_wrath/thunder_call s'alignent
+  # pour un burst, afin d'arriver à ce moment avec le plus de Fury possible
+  # (fenêtre à coût réduit de 50% sur Hammer Storm/Skull Crusher). Les
+  # générateurs (face_breaker/chain_lightning/wild_swing) et les procs
+  # (hammer_storm_proc/skull_crusher_proc) ne sont volontairement PAS
+  # concernés par ce flag -- cf. commentaire complet dans hooks.py.
+  # EN: not planner:fury_conserve (2026-07-13, condition renamed 2026-07-14 --
+  # EN: CombatState migration, flag:X -> planner:X): Planner wiring (cf.
+  # EN: hooks.py) -- this is a DISCRETIONARY Fury DUMP (not a proc, not
+  # EN: heavy_strike), held back while focused_wrath/thunder_call align for a
+  # EN: burst, to arrive at that moment with as much Fury as possible
+  # EN: (50%-reduced-cost window on Hammer Storm/Skull Crusher). The
+  # EN: generators (face_breaker/chain_lightning/wild_swing) and the procs
+  # EN: (hammer_storm_proc/skull_crusher_proc) are deliberately NOT affected
+  # EN: by this flag -- cf. the full comment in hooks.py.
   #
   # fury_above:50 -> 30 (2026-07-13, demandé par l'utilisateur) : skull_crusher_proc
   # (probablement la même dépense sous-jacente) est documenté à fury_above:23
@@ -417,7 +423,7 @@ abilities:
     skip_detection: true
     cooldown_ms: 1
     gcd_ms: 650
-    condition: fury_above:30, not buff:hammer_storm_empowered, not flag:fury_conserve
+    condition: fury_above:30, not buff:hammer_storm_empowered, not planner:fury_conserve
 
   # cooldown_ms:1 était un placeholder -- vrai cooldown confirmé par l'utilisateur :
   # 4.44s (même valeur que Culling Strike). Contrairement à culling_strike/

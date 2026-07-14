@@ -7,6 +7,17 @@ focus_check.log
 input_timing.log
 press_confirm.log
 
+# Phase 4 (2026-07-14, télémétrie + tuning appris) : telemetry.jsonl
+# s'accumule à travers PLUSIEURS sessions (contrairement aux logs ci-dessus,
+# cf. wardenbot/telemetry.py) mais reste une donnée d'exécution propre à CETTE
+# machine/session de jeu -- pas du code projet. kb/ contient les suggestions
+# générées par wardenbot/kb_engine.py (kb/combat_tuning.suggested.json) et le
+# tuning actif une fois approuvé (kb/combat_tuning.json, cf. "human-in-the-
+# loop") -- tant que rien n'a été validé comme réutilisable au-delà d'une
+# machine donnée, tout /kb reste ignoré.
+telemetry.jsonl
+/kb/
+
 # Python
 __pycache__/
 *.pyc

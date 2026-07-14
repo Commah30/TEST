@@ -23,7 +23,7 @@ abilities:
     priority_st: 0
     priority_aoe: 0
     off_gcd: true
-    condition: "flag:need_shield"
+    condition: "hooks:need_shield"
     cooldown_ms: 1
     skip_detection: true
 
@@ -56,3 +56,151 @@ abilities:
     off_gcd: true
     cooldown_ms: 10000
     condition: "health_below:60"
+
+# =============================================================================
+# sequences: -- Phase 3 (2026-07-14, migration architecture CombatState/Intent
+# / Decision Planner). Bloc de haut niveau séparé de abilities: (cf.
+# wardenbot/engine.py::Sequence/parse_sequences pour le format complet).
+#
+# 4 séquences migrées depuis hooks.py::meiko_pre_tick -- TOUTES les branches
+# Storm/Earth (build ET spend), choisies pour être les PLUS sûres possibles :
+#   - Rising Storm       : Wind Kick  -> Spirit Palm (2e pièce) -> Fighting Techniques (build Stormfall)
+#   - Lashing Stormkick   : Wind Kick  -> Earth Fist  (2e pièce) -> Fighting Techniques (spend Stormfall, +1 stack Warden)
+#   - Rising Earth        : Earth Fist -> Spirit Palm (2e pièce) -> Fighting Techniques (build Earthfall)
+#   - Earthfist Barrage    : Earth Fist -> Wind Kick  (2e pièce) -> Fighting Techniques (spend Earthfall, +1 stack Warden)
+#
+# NON migré, DÉLIBÉRÉMENT : le combo défensif (branche `if last ==
+# "spirit_palm":` de hooks.py -- règle des 3 stacks, fenêtre de confirmation,
+# priming/dé-priming, refresh proactif de Strikes par OCR). C'est exactement
+# la "logique complexe" que la stratégie de migration douce demande de
+# laisser en Python -- une séquence à steps fixes ne peut pas exprimer
+# proprement "quel 2e coup presser" quand la réponse dépend d'un arbre de
+# décision à plusieurs variables d'état (stacks, primed, fenêtres de
+# confirmation), ni les effets de bord multi-tick qui l'accompagnent
+# (dé-priming après le Vortex forcé, etc.).
+#
+# MUTUELLE EXCLUSION build/spend : Rising Storm et Lashing Stormkick partagent
+# le même déclencheur (last:wind_kick) mais divergent selon Stormfall --
+# leurs conditions d'ENTRÉE utilisent stormfall_above:99.9 (cf.
+# engine.py::_eval_token, 2026-07-14) pour rester mutuellement exclusives,
+# exactement comme le `if stormfall >= 0.999: ... else: ...` de hooks.py.
+# Même principe pour Rising Earth / Earthfist Barrage avec earthfall_above.
+#
+# meiko_pre_tick (poids 90, cf. hooks.py) garde le dernier mot PENDANT TOUTE
+# LA TRANSITION pour les 4 : dès que last_cast == wind_kick/earth_fist, sa
+# branche correspondante propose AUSSI quelque chose à un poids strictement
+# supérieur (90 > 80, cf. Intent) -- ces séquences ne peuvent donc RÉELLEMENT
+# gagner que sur les ticks où meiko_pre_tick ne propose rien du tout pour le
+# combo en cours. Elles restent "garées" sur leur step courant le reste du
+# temps (cf. _advance_sequence, engine.py) plutôt que de désynchroniser quoi
+# que ce soit -- migration sans risque, observable, avant un futur cutover
+# (qui devra aussi porter la logique de stack-granting, cf. ci-dessus).
+#
+# condition/step conditions basées sur last:X (même grammaire que
+# abilities:condition, cf. engine.py::evaluate_condition) -- si le monde a
+# bougé sans elles (hook déjà engagé sur autre chose), la condition du step
+# en cours devient fausse et la séquence est purgée plutôt que de rester
+# bloquée (cf. _advance_sequence) : elle repart de zéro la prochaine fois que
+# sa condition d'entrée redevient vraie.
+# EN: sequences: -- Phase 3 (2026-07-14, CombatState/Intent/Decision Planner
+# EN: architecture migration). Top-level block separate from abilities: (cf.
+# EN: wardenbot/engine.py::Sequence/parse_sequences for the full format).
+# EN:
+# EN: 4 sequences migrated from hooks.py::meiko_pre_tick -- ALL the Storm/
+# EN: Earth branches (build AND spend), chosen to be the SAFEST possible:
+# EN:   - Rising Storm       : Wind Kick  -> Spirit Palm (2nd piece) -> Fighting Techniques (builds Stormfall)
+# EN:   - Lashing Stormkick   : Wind Kick  -> Earth Fist  (2nd piece) -> Fighting Techniques (spends Stormfall, +1 Warden stack)
+# EN:   - Rising Earth        : Earth Fist -> Spirit Palm (2nd piece) -> Fighting Techniques (builds Earthfall)
+# EN:   - Earthfist Barrage    : Earth Fist -> Wind Kick  (2nd piece) -> Fighting Techniques (spends Earthfall, +1 Warden stack)
+# EN:
+# EN: NOT migrated, DELIBERATELY: the defensive combo (hooks.py's `if last ==
+# EN: "spirit_palm":` branch -- the 3-stack rule, confirmation window,
+# EN: priming/un-priming, proactive OCR-based Strikes refresh). This is
+# EN: exactly the "complex logic" the soft migration strategy asks to leave
+# EN: in Python -- a fixed-step sequence can't cleanly express "which 2nd hit
+# EN: to press" when the answer depends on a multi-variable decision tree
+# EN: (stacks, primed, confirmation windows), nor the multi-tick side effects
+# EN: that come with it (un-priming after the forced Vortex, etc.).
+# EN:
+# EN: build/spend MUTUAL EXCLUSION: Rising Storm and Lashing Stormkick share
+# EN: the same trigger (last:wind_kick) but diverge on Stormfall -- their
+# EN: ENTRY conditions use stormfall_above:99.9 (cf. engine.py::_eval_token,
+# EN: 2026-07-14) to stay mutually exclusive, exactly like hooks.py's `if
+# EN: stormfall >= 0.999: ... else: ...`. Same principle for Rising Earth /
+# EN: Earthfist Barrage with earthfall_above.
+# EN:
+# EN: meiko_pre_tick (weight 90, cf. hooks.py) keeps the last word DURING THE
+# EN: WHOLE TRANSITION for all 4: as soon as last_cast == wind_kick/
+# EN: earth_fist, its matching branch ALSO proposes something at a strictly
+# EN: higher weight (90 > 80, cf. Intent) -- these sequences can thus only
+# EN: REALLY win on ticks where meiko_pre_tick proposes nothing at all for
+# EN: the combo in progress. They stay "parked" on their current step the
+# EN: rest of the time (cf. _advance_sequence, engine.py) rather than
+# EN: desyncing anything -- a risk-free, observable migration ahead of a
+# EN: future cutover (which will also need to carry over the stack-granting
+# EN: logic, cf. above).
+# EN:
+# EN: condition/step conditions based on last:X (same grammar as
+# EN: abilities:condition, cf. engine.py::evaluate_condition) -- if the world
+# EN: has moved on without them (the hook already engaged on something else),
+# EN: the current step's condition becomes false and the sequence is purged
+# EN: rather than staying stuck (cf. _advance_sequence): it starts fresh next
+# EN: time its entry condition becomes true again.
+# =============================================================================
+# BUG TROUVÉ EN JEU (2026-07-17, rapport de session l'utilisateur, cf. hooks.py::
+# STORM_EARTH_SPEND_THRESHOLD) : Lashing Stormkick/Earthfist Barrage ne
+# consomment qu'UN SEUL orbe par cast, pas les deux -- les conditions
+# d'entrée ci-dessous utilisaient stormfall_above:99.9/earthfall_above:99.9
+# (les 2 orbes) comme seuil de "spend", exactement le même bug que celui
+# corrigé dans hooks.py. Seuil abaissé à 0.1 (> 0, cf. even
+# stormfall_above:N -> resources["stormfall"]*100 >= N) pour dépenser dès
+# qu'AU MOINS un orbe est disponible -- ces séquences restent en mode
+# fantôme (poids 80 < 90, cf. hooks.py::meiko_pre_tick) donc ce changement
+# n'a AUCUN effet observable en jeu aujourd'hui, seulement sur la cohérence
+# de state.sequences["active_sequence"] pour un futur débogage.
+# EN: BUG FOUND IN-GAME (2026-07-17, the user's session report, cf. hooks.py::
+# EN: STORM_EARTH_SPEND_THRESHOLD): Lashing Stormkick/Earthfist Barrage only
+# EN: consume ONE orb per cast, not both -- the entry conditions below used
+# EN: stormfall_above:99.9/earthfall_above:99.9 (both orbs) as the "spend"
+# EN: threshold, the exact same bug fixed in hooks.py. Threshold lowered to
+# EN: 0.1 (> 0, cf. stormfall_above:N -> resources["stormfall"]*100 >= N) to
+# EN: spend as soon as AT LEAST one orb is available -- these sequences stay
+# EN: in shadow mode (weight 80 < 90, cf. hooks.py::meiko_pre_tick) so this
+# EN: change has NO observable effect in-game today, only on the consistency
+# EN: of state.sequences["active_sequence"] for future debugging.
+sequences:
+  - name: meiko_rising_storm
+    condition: "last:wind_kick, not stormfall_above:0.1"
+    interruptible: true
+    steps:
+      - ability: spirit_palm_2
+        condition: "last:wind_kick"
+      - ability: fighting_techniques
+        condition: "last:spirit_palm_2"
+
+  - name: meiko_lashing_stormkick
+    condition: "last:wind_kick, stormfall_above:0.1"
+    interruptible: true
+    steps:
+      - ability: earth_fist_2
+        condition: "last:wind_kick"
+      - ability: fighting_techniques
+        condition: "last:earth_fist_2"
+
+  - name: meiko_rising_earth
+    condition: "last:earth_fist, not earthfall_above:0.1"
+    interruptible: true
+    steps:
+      - ability: spirit_palm_2
+        condition: "last:earth_fist"
+      - ability: fighting_techniques
+        condition: "last:spirit_palm_2"
+
+  - name: meiko_earthfist_barrage
+    condition: "last:earth_fist, earthfall_above:0.1"
+    interruptible: true
+    steps:
+      - ability: wind_kick_2
+        condition: "last:earth_fist"
+      - ability: fighting_techniques
+        condition: "last:wind_kick_2"

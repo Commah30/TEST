@@ -1,0 +1,7 @@
+path: C:/wardenbot/dataset_meiko_buffs
+train: images/train
+val: images/val
+names:
+  0: spirited_vortex
+  1: spirited_strikes
+  2: warden_of_the_temple_3

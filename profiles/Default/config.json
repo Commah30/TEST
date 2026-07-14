@@ -22,8 +22,9 @@
         "wind_kick": {"left": 1095, "top": 1329, "width": 52, "height": 53},
         "earth_fist": {"left": 1161, "top": 1332, "width": 45, "height": 47},
         "fighting_techniques": {"left": 1224, "top": 1329, "width": 48, "height": 50},
-        "stormfall_lit": {"left": 572, "top": 864, "width": 10, "height": 10},
-        "buff_bar": {"left": 2096, "top": 1183, "width": 223, "height": 47}
+        "stormfall_orb_1": {"left": 516, "top": 921, "width": 9, "height": 7},
+        "stormfall_orb_2": {"left": 563, "top": 920, "width": 13, "height": 9},
+        "buff_bar": {"left": 970, "top": 1280, "width": 350, "height": 150}
       }
     },
     "tariq": {

@@ -24,32 +24,123 @@ EN: that decides what to press -- no more "I think the hook does that".
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 import traceback
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Optional
 
 import yaml
+
+from .freshness import DetectionMeta
+from .telemetry import TelemetryWorker
 
 
 # =============================================================================
 # État mutable du bot : dernier cast, cooldowns internes, flags, ressources,
 # debuffs/buffs détectés, vie, etc. C'est ce que les hooks et les conditions
 # lisent/écrivent à chaque tick.
+#
+# SCISSION detection/hooks/planner (2026-07-14, migration mécanique --
+# CombatState, cf. CLAUDE.md/discussion architecture) : remplace l'ancien
+# `flags` (un seul dict fourre-tout, écrit à la fois par state_update.py ET
+# hooks.py, avec pour seule garantie un commentaire "ne jamais écraser en
+# bloc") par 3 dicts dont le PROPRIÉTAIRE EN ÉCRITURE est structurellement
+# distinct. Migration purement mécanique : mêmes clés, mêmes valeurs, aucun
+# changement de comportement -- seulement le tiroir dans lequel chaque clé
+# vit désormais. `planner` n'est PAS vide : il reprend dès maintenant
+# tariq_objective/burst_hold/fury_conserve (_update_tariq_planner, hooks.py),
+# qui existent déjà en prod.
 # EN: Mutable bot state: last cast, internal cooldowns, flags, resources,
 # EN: detected debuffs/buffs, health, etc. This is what the hooks and
 # EN: conditions read/write every tick.
+# EN:
+# EN: detection/hooks/planner SPLIT (2026-07-14, mechanical migration --
+# EN: CombatState, cf. CLAUDE.md/architecture discussion): replaces the former
+# EN: `flags` (a single catch-all dict, written by BOTH state_update.py AND
+# EN: hooks.py, with only a comment "never overwrite wholesale" as a
+# EN: guarantee) with 3 dicts whose WRITE OWNER is structurally distinct.
+# EN: Purely mechanical migration: same keys, same values, no behavior change
+# EN: -- only which drawer each key now lives in. `planner` is NOT empty: it
+# EN: already holds tariq_objective/burst_hold/fury_conserve
+# EN: (_update_tariq_planner, hooks.py), which already exist in production.
 # =============================================================================
 @dataclass
-class State:
+class CombatState:
     last_cast: Optional[str] = None
     last_cast_time: float = 0.0
     cast_history: list = field(default_factory=list)   # plus récent en dernier, max 10 · EN: most recent last, max 10
     cooldown_until: dict = field(default_factory=dict)  # name -> timestamp
     gcd_until: float = 0.0
     hard_lock_until: float = 0.0    # bloque TOUTE ability, même off_gcd -- pour les canalisations qui ne doivent jamais être coupées (ex. Hammer Storm côté Tariq) · EN: blocks EVERY ability, even off_gcd -- for channels that must never be interrupted (e.g. Hammer Storm on Tariq)
-    flags: dict = field(default_factory=dict)           # name -> bool, posés par TES hooks · EN: set by YOUR hooks
+    # name -> bool/float, écrit UNIQUEMENT par state_update_fn (threads de
+    # détection : YOLO/OCR/template match/bar_reader) -- jamais par les hooks.
+    # EN: name -> bool/float, written ONLY by state_update_fn (detection
+    # EN: threads: YOLO/OCR/template match/bar_reader) -- never by the hooks.
+    detection: dict = field(default_factory=dict)
+    # source (str, ex: "meiko_yolo"/"meiko_ocr"/"tariq_yolo"/"tariq_bars") ->
+    # DetectionMeta (cf. wardenbot/freshness.py) -- horodatage de la DERNIÈRE
+    # publication réelle de CETTE source, PAS les valeurs détectées
+    # elles-mêmes (qui restent dans `detection` ci-dessus, inchangé). Dict
+    # SÉPARÉ plutôt qu'un champ "age_ms" mélangé dans `detection` : ce
+    # seraient deux propriétaires différents (state_update.py écrit les
+    # valeurs ET leur fraîcheur, mais ce sont deux natures d'information
+    # distinctes -- "ce qui a été vu" vs "à quel point c'est encore fiable")
+    # dans un même dict, exactement le genre de mélange que la scission
+    # detection/hooks/planner a corrigé une fois déjà (cf. plus haut).
+    # Rien ne LIT encore ce champ pour décider quoi que ce soit (Phase 0,
+    # 2026-07-14, cf. discussion) -- seulement mesuré et classifiable via
+    # wardenbot/freshness.py::FreshnessPolicy.classify(), jamais encore câblé
+    # dans hooks.py.
+    # EN: source (str, e.g. "meiko_yolo"/"meiko_ocr"/"tariq_yolo"/
+    # EN: "tariq_bars") -> DetectionMeta (cf. wardenbot/freshness.py) --
+    # EN: timestamp of the LAST real publication of THIS source, NOT the
+    # EN: detected values themselves (which stay in `detection` above,
+    # EN: unchanged). SEPARATE dict rather than an "age_ms" field mixed into
+    # EN: `detection`: these would be two different owners (state_update.py
+    # EN: writes the values AND their freshness, but these are two distinct
+    # EN: kinds of information -- "what was seen" vs "how reliable is it
+    # EN: still") in the same dict, exactly the kind of mixing the
+    # EN: detection/hooks/planner split already fixed once (cf. above).
+    # EN: Nothing READS this field yet to decide anything (Phase 0,
+    # EN: 2026-07-14, cf. discussion) -- only measured and classifiable via
+    # EN: wardenbot/freshness.py::FreshnessPolicy.classify(), not yet wired
+    # EN: into hooks.py.
+    detection_meta: "dict[str, DetectionMeta]" = field(default_factory=dict)
+    # name -> bool/int/float/str, mémoire des hooks pre/post-tick (hooks.py) :
+    # compteurs de debounce, marqueurs "en attente de confirmation", compteur
+    # de stacks Warden of the Temple, etc.
+    # EN: name -> bool/int/float/str, memory of the pre/post-tick hooks
+    # EN: (hooks.py): debounce counters, "pending confirmation" markers, the
+    # EN: Warden of the Temple stack counter, etc.
+    hooks: dict = field(default_factory=dict)
+    # name -> bool/str/float, intentions du Planner (_update_tariq_planner,
+    # hooks.py) -- lues par les conditions YAML via planner:X, au même titre
+    # que hooks:X, mais écrites par une couche de décision distincte (au-
+    # dessus des priorités fixes), pas par le bookkeeping pre/post-tick.
+    # EN: name -> bool/str/float, Planner intentions (_update_tariq_planner,
+    # EN: hooks.py) -- read by YAML conditions via planner:X, just like
+    # EN: hooks:X, but written by a separate decision layer (above the fixed
+    # EN: priorities), not by the pre/post-tick bookkeeping.
+    planner: dict = field(default_factory=dict)
+    # active_sequence (str|None) / sequence_step (int) -- possédé EXCLUSIVEMENT
+    # par RotationEngine._advance_sequence (le Sequence Tracker, cf. Sequence
+    # plus bas) -- PAS par hooks.py. Volontairement PAS rangé dans `hooks` :
+    # ce serait remélanger deux propriétaires différents dans un même dict
+    # (exactement le problème que la scission detection/hooks/planner
+    # ci-dessus vient de corriger) -- le moteur lui-même a maintenant besoin
+    # de sa propre mémoire, distincte de celle des hooks Python (2026-07-14,
+    # migration sequences).
+    # EN: active_sequence (str|None) / sequence_step (int) -- owned EXCLUSIVELY
+    # EN: by RotationEngine._advance_sequence (the Sequence Tracker, cf.
+    # EN: Sequence below) -- NOT by hooks.py. Deliberately NOT stored in
+    # EN: `hooks`: that would remix two different owners into the same dict
+    # EN: (exactly the problem the detection/hooks/planner split above just
+    # EN: fixed) -- the engine itself now needs its own memory, distinct from
+    # EN: the Python hooks' (2026-07-14, sequences migration).
+    sequences: dict = field(default_factory=dict)
     debuffs: dict = field(default_factory=dict)         # name -> bool, posés par la détection · EN: set by detection
     buffs: dict = field(default_factory=dict)           # name -> bool
     resources: dict = field(default_factory=dict)       # name -> 0.0-1.0
@@ -159,28 +250,127 @@ def load_abilities(yaml_path: str) -> tuple[list[Ability], dict]:
 
 
 # =============================================================================
+# sequences: -- bloc YAML de haut niveau, séparé de abilities: (2026-07-14,
+# migration Phase 3, discussion architecture). Une séquence est un enchaînement
+# STRICT d'actions : si sa condition d'entrée devient vraie, le Sequence
+# Tracker (RotationEngine._advance_sequence) s'y engage et propose ses steps
+# dans l'ordre, un par tick, plutôt que de laisser le scan de priorité YAML
+# classique (abilities:) choisir librement.
+#
+# MIGRATION PROGRESSIVE, PAS UNE RÉÉCRITURE : un step de séquence propose un
+# Intent de poids 80 (cf. Intent) -- volontairement ENTRE le scan de priorité
+# (50) et le pre_tick_hook (90). Tant qu'un pre_tick_hook Python gère encore
+# le même combo (cas de meiko_pre_tick aujourd'hui), il garde la main à
+# chaque fois qu'il propose quelque chose : la séquence YAML "essaie" en
+# parallèle, sans jamais pouvoir court-circuiter une logique Python encore en
+# place. Elle ne prend RÉELLEMENT le relai que pour les ticks où le hook ne
+# propose rien (aujourd'hui : la toute première ouverture de combo, cf.
+# hooks.py). Couper la logique Python correspondante (pour que la séquence
+# gagne vraiment tout le temps) est un choix VOLONTAIREMENT reporté à une
+# phase ultérieure, une fois la séquence validée en conditions réelles.
+# EN: sequences: -- top-level YAML block, separate from abilities: (2026-07-14,
+# EN: Phase 3 migration, architecture discussion). A sequence is a STRICT
+# EN: chain of actions: if its entry condition becomes true, the Sequence
+# EN: Tracker (RotationEngine._advance_sequence) engages and proposes its
+# EN: steps in order, one per tick, instead of letting the classic YAML
+# EN: priority scan (abilities:) choose freely.
+# EN:
+# EN: PROGRESSIVE MIGRATION, NOT A REWRITE: a sequence step proposes an Intent
+# EN: of weight 80 (cf. Intent) -- deliberately BETWEEN the priority scan (50)
+# EN: and the pre_tick_hook (90). As long as a Python pre_tick_hook still
+# EN: handles the same combo (meiko_pre_tick's case today), it keeps the hand
+# EN: every time it proposes something: the YAML sequence "tries" in
+# EN: parallel, never able to short-circuit Python logic still in place. It
+# EN: only REALLY takes over on ticks where the hook proposes nothing (today:
+# EN: the very first combo opener, cf. hooks.py). Cutting the corresponding
+# EN: Python logic (so the sequence truly wins all the time) is a choice
+# EN: DELIBERATELY deferred to a later phase, once the sequence is validated
+# EN: under real conditions.
+# =============================================================================
+@dataclass
+class SequenceStep:
+    ability: str
+    condition: str = ""   # évaluée par evaluate_condition (même grammaire que Ability.condition) -- vide = toujours vraie · EN: evaluated by evaluate_condition (same grammar as Ability.condition) -- empty = always true
+
+
+@dataclass
+class Sequence:
+    name: str
+    condition: str = ""   # condition d'ENTRÉE -- évaluée seulement tant qu'aucune instance de cette séquence n'est déjà active · EN: ENTRY condition -- evaluated only while no instance of this sequence is already active
+    # accepté mais PAS ENCORE câblé dans le moteur (cf. Ability.gcd_ms/is_proc
+    # ci-dessus, même famille de champs "acceptés pour que le YAML charge,
+    # sémantique à confirmer avant d'y toucher") -- pensé pour empêcher toute
+    # AUTRE source de gagner pendant qu'une séquence tourne, une fois que le
+    # cutover (cf. docstring du bloc plus haut) rendra ça nécessaire.
+    # EN: accepted but NOT YET wired into the engine (cf. Ability.gcd_ms/is_proc
+    # EN: above, same family of fields "accepted so the YAML loads, semantics
+    # EN: to confirm before touching") -- meant to prevent any OTHER source
+    # EN: from winning while a sequence runs, once the cutover (cf. the block's
+    # EN: docstring above) makes that necessary.
+    interruptible: bool = True
+    steps: "list[SequenceStep]" = field(default_factory=list)
+
+
+def parse_sequences(raw_sequences: "list[dict] | None") -> "list[Sequence]":
+    """Convertit le bloc `sequences:` brut du YAML (déjà exposé tel quel dans
+    le `meta` retourné par load_abilities, cf. ci-dessus -- pas besoin de
+    relire le fichier) en objets Sequence/SequenceStep typés. Absent du YAML
+    (raw_sequences=None, ou clé absente de `meta`) -> liste vide : comportement
+    par défaut pour tout personnage qui n'a pas encore de séquence migrée
+    (Tariq aujourd'hui) -- RotationEngine doit fonctionner à l'identique
+    qu'avant cette migration quand cette liste est vide.
+
+    EN: Converts the raw `sequences:` block from the YAML (already exposed
+    EN: as-is in the `meta` returned by load_abilities, cf. above -- no need to
+    EN: re-read the file) into typed Sequence/SequenceStep objects. Absent from
+    EN: the YAML (raw_sequences=None, or the key missing from `meta`) -> empty
+    EN: list: default behavior for any character without a migrated sequence
+    EN: yet (Tariq today) -- RotationEngine must behave identically to before
+    EN: this migration when this list is empty.
+    """
+    if not raw_sequences:
+        return []
+    sequences = []
+    for raw_seq in raw_sequences:
+        steps = [SequenceStep(**step) for step in raw_seq.get("steps", [])]
+        sequences.append(Sequence(
+            name=raw_seq["name"],
+            condition=raw_seq.get("condition", ""),
+            interruptible=raw_seq.get("interruptible", True),
+            steps=steps,
+        ))
+    return sequences
+
+
+# =============================================================================
 # Évaluation des conditions -- tokens
 # séparés par des virgules (AND), préfixe "not " pour la négation.
 #   last:X            -> state.last_cast == X
-#   flag:X             -> state.flags[X] est vrai (posé par TES hooks)
+#   hooks:X            -> state.hooks[X] est vrai (posé par les hooks pre/post-tick)
+#   planner:X          -> state.planner[X] est vrai (posé par le Planner, ex. _update_tariq_planner)
 #   debuff:X           -> state.debuffs[X] est vrai (posé par la détection)
 #   buff:X             -> state.buffs[X] est vrai
 #   resource_full       -> state.resources["primary"] >= 0.999
 #   resource_above:N    -> state.resources["primary"]*100 >= N
 #   fury_above:N        -> state.resources["fury"]*100 >= N
+#   stormfall_above:N   -> state.resources["stormfall"]*100 >= N (Meiko, 2026-07-14 -- entrée des séquences Storm)
+#   earthfall_above:N   -> state.resources["earthfall"]*100 >= N (Meiko, 2026-07-14 -- entrée des séquences Earth)
 #   health_below:N / health_above:N
 # EN: Condition evaluation -- tokens separated by commas (AND), prefix "not "
 # EN: for negation.
 # EN:   last:X            -> state.last_cast == X
-# EN:   flag:X             -> state.flags[X] is true (set by YOUR hooks)
+# EN:   hooks:X            -> state.hooks[X] is true (set by the pre/post-tick hooks)
+# EN:   planner:X          -> state.planner[X] is true (set by the Planner, e.g. _update_tariq_planner)
 # EN:   debuff:X           -> state.debuffs[X] is true (set by detection)
 # EN:   buff:X             -> state.buffs[X] is true
 # EN:   resource_full       -> state.resources["primary"] >= 0.999
 # EN:   resource_above:N    -> state.resources["primary"]*100 >= N
 # EN:   fury_above:N        -> state.resources["fury"]*100 >= N
+# EN:   stormfall_above:N   -> state.resources["stormfall"]*100 >= N (Meiko, 2026-07-14 -- Storm sequences entry)
+# EN:   earthfall_above:N   -> state.resources["earthfall"]*100 >= N (Meiko, 2026-07-14 -- Earth sequences entry)
 # EN:   health_below:N / health_above:N
 # =============================================================================
-def _eval_token(token: str, state: State) -> bool:
+def _eval_token(token: str, state: CombatState) -> bool:
     token = token.strip()
     negate = token.startswith("not ")
     if negate:
@@ -190,8 +380,10 @@ def _eval_token(token: str, state: State) -> bool:
 
     if key == "last":
         result = state.last_cast == value
-    elif key == "flag":
-        result = bool(state.flags.get(value, False))
+    elif key == "hooks":
+        result = bool(state.hooks.get(value, False))
+    elif key == "planner":
+        result = bool(state.planner.get(value, False))
     elif key == "debuff":
         result = bool(state.debuffs.get(value, False))
     elif key == "buff":
@@ -202,6 +394,10 @@ def _eval_token(token: str, state: State) -> bool:
         result = state.resources.get("primary", 0.0) * 100 >= float(value)
     elif key == "fury_above":
         result = state.resources.get("fury", 0.0) * 100 >= float(value)
+    elif key == "stormfall_above":
+        result = state.resources.get("stormfall", 0.0) * 100 >= float(value)
+    elif key == "earthfall_above":
+        result = state.resources.get("earthfall", 0.0) * 100 >= float(value)
     elif key == "health_below":
         result = state.health_pct < float(value)
     elif key == "health_above":
@@ -212,10 +408,150 @@ def _eval_token(token: str, state: State) -> bool:
     return (not result) if negate else result
 
 
-def evaluate_condition(condition: str, state: State) -> bool:
+def evaluate_condition(condition: str, state: CombatState) -> bool:
     if not condition:
         return True
     return all(_eval_token(t, state) for t in condition.split(","))
+
+
+# =============================================================================
+# Intent -- unité de négociation entre les sources de décision (pre_tick_hook,
+# scan de priorité YAML, et à terme un Decision Planner scoré). Chaque source
+# propose un Intent (quelle ability, quel poids, qui le propose) ;
+# RotationEngine.tick() retient celui au poids le plus élevé, plutôt que de
+# laisser une source court-circuiter les autres de façon absolue et invisible
+# (l'ancien pre_tick_hook -> Optional[str], où tout nom non-None gagnait
+# inconditionnellement contre le scan, cf. historique dans hooks.py).
+#
+# MIGRATION (2026-07-14) : pre_tick_hook propose systématiquement un poids de
+# 90 (cf. hooks.py) -- reproduit fidèlement l'ancien "GOTO absolu" : 90 est
+# construit pour rester strictement supérieur au poids de base du scan de
+# priorité YAML (50, cf. _pick_ability). Tant que ces deux poids restent des
+# CONSTANTES connues à l'avance, le résultat de la comparaison est déjà
+# déterminé sans avoir besoin d'évaluer le scan -- cf. le court-circuit
+# volontaire dans tick(). Les poids ne deviendront vraiment dynamiques (et le
+# court-circuit invalide) qu'à une phase ultérieure (scoring réel par
+# ability, Decision Planner).
+#
+# 3 NIVEAUX (2026-07-14, Phase 3 -- migration sequences) : un step de
+# séquence YAML (cf. Sequence plus haut) se glisse à 80, ENTRE le hook (90)
+# et le scan (50) -- tant qu'un pre_tick_hook Python gère encore le même
+# combo, il garde systématiquement la main ; la séquence ne prend le relai
+# que les ticks où le hook ne propose rien du tout.
+# EN: Intent -- the negotiation unit between the decision sources
+# EN: (pre_tick_hook, the YAML priority scan, and eventually a scored Decision
+# EN: Planner). Each source proposes an Intent (which ability, what weight,
+# EN: who proposes it); RotationEngine.tick() keeps the highest-weighted one,
+# EN: rather than letting one source absolutely and invisibly short-circuit
+# EN: the others (the former pre_tick_hook -> Optional[str], where any
+# EN: non-None name won unconditionally against the scan, cf. history in
+# EN: hooks.py).
+# EN:
+# EN: MIGRATION (2026-07-14): pre_tick_hook systematically proposes a weight
+# EN: of 90 (cf. hooks.py) -- faithfully reproduces the former "absolute
+# EN: GOTO": 90 is built to stay strictly above the YAML priority scan's base
+# EN: weight (50, cf. _pick_ability). As long as these two weights remain
+# EN: KNOWN CONSTANTS ahead of time, the comparison's result is already
+# EN: determined without needing to evaluate the scan -- cf. the deliberate
+# EN: short-circuit in tick(). Weights only become truly dynamic (and the
+# EN: short-circuit invalid) at a later phase (real per-ability scoring,
+# EN: Decision Planner).
+# EN:
+# EN: 3 TIERS (2026-07-14, Phase 3 -- sequences migration): a YAML sequence
+# EN: step (cf. Sequence above) slots in at 80, BETWEEN the hook (90) and the
+# EN: scan (50) -- as long as a Python pre_tick_hook still handles the same
+# EN: combo, it systematically keeps the hand; the sequence only takes over
+# EN: on ticks where the hook proposes nothing at all.
+# =============================================================================
+@dataclass
+class Intent:
+    ability: str
+    weight: float
+    source: str
+
+
+# =============================================================================
+# Tuning appris (Phase 4, 2026-07-14, cf. wardenbot/kb_engine.py +
+# wardenbot/telemetry.py) -- offsets de poids PAR NOM D'ABILITY, appliqués à
+# Intent.weight au moment de la comparaison (cf.
+# RotationEngine._effective_weight), quelle que soit la source (hook,
+# séquence, scan) qui a proposé cette ability.
+#
+# "Les 3 règles d'or" (cf. discussion) :
+#   1. Human-in-the-loop : ce module ne lit QUE kb/combat_tuning.json, un
+#      fichier que l'utilisateur approuve/édite lui-même -- rien dans ce projet
+#      n'écrit CE fichier automatiquement pendant que le bot tourne.
+#      kb_engine.py (offline, après combat) écrit une SUGGESTION séparée
+#      (kb/combat_tuning.suggested.json) ; l'utilisateur décide de la copier/éditer
+#      en kb/combat_tuning.json pour l'activer.
+#   2. Borné : MAX_WEIGHT_MODIFIER clampe chaque offset au chargement, avant
+#      même qu'il touche un seul Intent -- jamais 0 à l'infini.
+#   3. Contextualisation (cf. kb_engine.py) : les offsets sont calculés à
+#      partir de signaux RÉELS déjà capturés par ce projet (taux de presses
+#      fantômes via press_confirm.log, cf. hooks.py::_resolve_press_confirmations),
+#      jamais inventés à partir de détections qui n'existent pas encore
+#      (mouvement, portée, erreurs OCR -- cf. kb_engine.py pour le détail de
+#      ce qui est honnêtement mesurable aujourd'hui).
+# EN: Learned tuning (Phase 4, 2026-07-14, cf. wardenbot/kb_engine.py +
+# EN: wardenbot/telemetry.py) -- weight offsets PER ABILITY NAME, applied to
+# EN: Intent.weight at comparison time (cf. RotationEngine._effective_weight),
+# EN: regardless of which source (hook, sequence, scan) proposed that ability.
+# EN:
+# EN: "The 3 golden rules" (cf. discussion):
+# EN:   1. Human-in-the-loop: this module ONLY reads kb/combat_tuning.json, a
+# EN:      file the user approves/edits himself -- nothing in this project
+# EN:      writes THIS file automatically while the bot runs. kb_engine.py
+# EN:      (offline, after combat) writes a SEPARATE suggestion
+# EN:      (kb/combat_tuning.suggested.json); the user decides whether to
+# EN:      copy/edit it into kb/combat_tuning.json to activate it.
+# EN:   2. Bounded: MAX_WEIGHT_MODIFIER clamps every offset at load time,
+# EN:      before it even touches a single Intent -- never 0 to infinity.
+# EN:   3. Contextualization (cf. kb_engine.py): offsets are computed from
+# EN:      REAL signals already captured by this project (phantom-press rate
+# EN:      via press_confirm.log, cf. hooks.py::_resolve_press_confirmations),
+# EN:      never invented from detections that don't exist yet (movement,
+# EN:      range, OCR errors -- cf. kb_engine.py for what's honestly
+# EN:      measurable today).
+# =============================================================================
+MAX_WEIGHT_MODIFIER = 20.0
+
+DEFAULT_WEIGHT_OVERRIDES_PATH = Path("kb/combat_tuning.json")
+
+
+def load_weight_overrides(path: "str | Path" = DEFAULT_WEIGHT_OVERRIDES_PATH) -> "dict[str, float]":
+    """Charge kb/combat_tuning.json -- {ability_name: offset}. Fichier absent
+    -> {} (PAS une erreur : tant que rien n'a été approuvé, le moteur tourne
+    identique à avant cette fonctionnalité). JSON malformé -> {} également --
+    un fichier de tuning cassé ne doit jamais empêcher le bot de démarrer.
+
+    Chaque offset est clampé à ±MAX_WEIGHT_MODIFIER ICI, à la lecture -- même
+    si kb_engine.py (ou une édition manuelle) produit une valeur aberrante,
+    elle ne peut jamais dépasser cette borne une fois chargée dans le moteur.
+
+    EN: Loads kb/combat_tuning.json -- {ability_name: offset}. File absent ->
+    EN: {} (NOT an error: as long as nothing has been approved, the engine
+    EN: runs identically to before this feature). Malformed JSON -> {} as
+    EN: well -- a broken tuning file must never prevent the bot from starting.
+    EN:
+    EN: Each offset is clamped to ±MAX_WEIGHT_MODIFIER HERE, at load time --
+    EN: even if kb_engine.py (or a manual edit) produces an outlandish value,
+    EN: it can never exceed this bound once loaded into the engine.
+    """
+    path = Path(path)
+    if not path.exists():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    overrides: "dict[str, float]" = {}
+    for ability, entry in raw.get("overrides", {}).items():
+        offset = entry.get("weight_offset") if isinstance(entry, dict) else entry
+        if not isinstance(offset, (int, float)):
+            continue
+        overrides[ability] = max(-MAX_WEIGHT_MODIFIER, min(MAX_WEIGHT_MODIFIER, float(offset)))
+    return overrides
 
 
 # =============================================================================
@@ -226,14 +562,17 @@ class RotationEngine:
     def __init__(
         self,
         abilities: list[Ability],
-        state: State,
+        state: CombatState,
         press_fn: Callable[[str], None],
         is_ready_fn: Callable[..., bool],
         gcd_ms: int = 1100,
-        pre_tick_hook: Optional[Callable[[State], Optional[str]]] = None,
-        post_tick_hook: Optional[Callable[[State, str], None]] = None,
-        state_update_fn: Optional[Callable[[State], None]] = None,
+        pre_tick_hook: Optional[Callable[[CombatState], list[Intent]]] = None,
+        post_tick_hook: Optional[Callable[[CombatState, str], None]] = None,
+        state_update_fn: Optional[Callable[[CombatState], None]] = None,
         off_gcd_hook_abilities: frozenset = frozenset({"fighting_techniques"}),
+        sequences: "Optional[list[Sequence]]" = None,
+        telemetry: Optional[TelemetryWorker] = None,
+        weight_overrides: "Optional[dict[str, float]]" = None,
     ):
         """
         press_fn(ability_name)       -> envoie réellement la touche
@@ -245,19 +584,32 @@ class RotationEngine:
             lire l'écran et remplir state.resources/state.debuffs/state.buffs
             (charges Stormfall/Earthfall, debuff Warden of the Temple x3,
             etc.) -- sans ça, rien ne met ces valeurs à jour automatiquement.
-        pre_tick_hook(state) -> Optional[str]
-            Appelé APRÈS state_update_fn, AVANT le scan de priorité. Si elle
-            retourne un nom d'ability, CE nom est pressé directement ce tick,
-            le scan normal est sauté. Sert à compléter un combo en cours
-            (équivalent à meiko_combo_pre_tick, mais en clair).
+        pre_tick_hook(state) -> list[Intent]
+            Appelé APRÈS state_update_fn, AVANT le scan de priorité (cf.
+            Intent plus haut). Retourne une liste d'Intent (vide si rien à
+            proposer ce tick) -- PAS un nom nu. Chaque proposition a un poids
+            de 90 (cf. hooks.py) : strictement supérieur au poids de base du
+            scan (50), donc le hook l'emporte à chaque fois qu'il propose
+            quelque chose -- même résultat qu'avant cette migration, mais
+            négocié plutôt que codé en dur. Sert à compléter un combo en
+            cours (équivalent à meiko_combo_pre_tick, mais en clair).
         post_tick_hook(state, pressed_name)
             Appelé APRÈS qu'une touche a été pressée (par le hook ou par le
-            scan). Sert à mettre à jour flags/timers (équivalent à
-            meiko_combo_post_tick).
+            scan) -- reçoit toujours un nom nu (str), jamais un Intent : le
+            gagnant a déjà été tranché à ce stade. Sert à mettre à jour
+            flags/timers (équivalent à meiko_combo_post_tick).
         off_gcd_hook_abilities
             Noms pressés par pre_tick_hook qui ne posent PAS de nouveau GCD
             (ex: le finisher, off-GCD par nature). Tout le reste pressé par
-            le hook pose un GCD normal, comme une ability classique.
+            le hook pose un GCD normal, comme une ability classique. Sert
+            AUSSI au Sequence Tracker (cf. Sequence plus haut) : un step dont
+            l'ability figure ici ne bloque pas non plus sur le GCD.
+        sequences (2026-07-14, Phase 3) : liste de Sequence (cf. plus haut,
+            engine.py::parse_sequences) -- None/liste vide (défaut) = AUCUN
+            changement de comportement, exactement comme avant leur
+            introduction. Suivies par le Sequence Tracker (cf.
+            _advance_sequence), qui propose un Intent de poids 80 par tick
+            tant qu'une séquence est active.
 
         EN: press_fn(ability_name)       -> actually sends the key
         EN: is_ready_fn(ability_name, confidence_threshold=None)
@@ -269,18 +621,55 @@ class RotationEngine:
         EN:     read the screen and fill state.resources/state.debuffs/state.buffs
         EN:     (Stormfall/Earthfall charges, Warden of the Temple x3 debuff,
         EN:     etc.) -- without it, nothing updates these values automatically.
-        EN: pre_tick_hook(state) -> Optional[str]
-        EN:     Called AFTER state_update_fn, BEFORE the priority scan. If it
-        EN:     returns an ability name, THAT name is pressed directly this tick,
-        EN:     the normal scan is skipped. Used to complete an in-progress combo
+        EN: pre_tick_hook(state) -> list[Intent]
+        EN:     Called AFTER state_update_fn, BEFORE the priority scan (cf.
+        EN:     Intent above). Returns a list of Intent (empty if nothing to
+        EN:     propose this tick) -- NOT a bare name. Each proposal has a
+        EN:     weight of 90 (cf. hooks.py): strictly above the scan's base
+        EN:     weight (50), so the hook wins every time it proposes something
+        EN:     -- same result as before this migration, but negotiated rather
+        EN:     than hardcoded. Used to complete an in-progress combo
         EN:     (equivalent to meiko_combo_pre_tick, but in plain code).
         EN: post_tick_hook(state, pressed_name)
-        EN:     Called AFTER a key has been pressed (by the hook or the scan).
-        EN:     Used to update flags/timers (equivalent to meiko_combo_post_tick).
+        EN:     Called AFTER a key has been pressed (by the hook or the scan)
+        EN:     -- always receives a bare name (str), never an Intent: the
+        EN:     winner has already been decided by this point. Used to update
+        EN:     flags/timers (equivalent to meiko_combo_post_tick).
         EN: off_gcd_hook_abilities
         EN:     Names pressed by pre_tick_hook that do NOT set a new GCD (e.g.
         EN:     the finisher, off-GCD by nature). Everything else pressed by the
-        EN:     hook sets a normal GCD, like a regular ability.
+        EN:     hook sets a normal GCD, like a regular ability. ALSO used by the
+        EN:     Sequence Tracker (cf. Sequence above): a step whose ability is
+        EN:     listed here doesn't block on the GCD either.
+        EN: sequences (2026-07-14, Phase 3): list of Sequence (cf. above,
+        EN:     engine.py::parse_sequences) -- None/empty list (default) = NO
+        EN:     behavior change, exactly like before their introduction.
+        EN:     Tracked by the Sequence Tracker (cf. _advance_sequence), which
+        EN:     proposes a weight-80 Intent per tick while a sequence is active.
+        telemetry (2026-07-14, Phase 4) : TelemetryWorker (cf.
+            wardenbot/telemetry.py) déjà construit ET DÉMARRÉ par l'appelant --
+            None (défaut) = AUCUNE journalisation, AUCUN changement de
+            comportement. RotationEngine ne construit JAMAIS de
+            TelemetryWorker lui-même (cf. docstring module telemetry.py) --
+            sinon chaque RotationEngine() de test ouvrirait un fichier et
+            démarrerait un thread.
+        weight_overrides (2026-07-14, Phase 4) : dict {ability: offset} (cf.
+            load_weight_overrides) -- None/{} (défaut) = AUCUN changement de
+            comportement. Offsets déjà clampés à ±MAX_WEIGHT_MODIFIER par
+            load_weight_overrides -- RotationEngine ne les re-clampe pas, il
+            fait confiance à l'appelant.
+
+        EN: telemetry (2026-07-14, Phase 4): TelemetryWorker (cf.
+        EN:     wardenbot/telemetry.py) already built AND STARTED by the
+        EN:     caller -- None (default) = NO logging, NO behavior change.
+        EN:     RotationEngine NEVER builds a TelemetryWorker itself (cf.
+        EN:     telemetry.py's module docstring) -- otherwise every test's
+        EN:     RotationEngine() would open a file and start a thread.
+        EN: weight_overrides (2026-07-14, Phase 4): dict {ability: offset}
+        EN:     (cf. load_weight_overrides) -- None/{} (default) = NO behavior
+        EN:     change. Offsets already clamped to ±MAX_WEIGHT_MODIFIER by
+        EN:     load_weight_overrides -- RotationEngine doesn't re-clamp them,
+        EN:     it trusts the caller.
         """
         self.abilities = abilities
         self.state = state
@@ -290,7 +679,28 @@ class RotationEngine:
         self.pre_tick_hook = pre_tick_hook
         self.post_tick_hook = post_tick_hook
         self.state_update_fn = state_update_fn
+        self.telemetry = telemetry
+        self.weight_overrides = weight_overrides or {}
         self.off_gcd_hook_abilities = off_gcd_hook_abilities
+        self.sequences = sequences or []
+        # Lookup nom -> Sequence -- même principe que _ability_by_name
+        # ci-dessous, pour retrouver l'objet complet une fois son nom lu dans
+        # state.sequences["active_sequence"] (cf. _advance_sequence).
+        # EN: name -> Sequence lookup -- same principle as _ability_by_name
+        # EN: below, to retrieve the full object once its name is read from
+        # EN: state.sequences["active_sequence"] (cf. _advance_sequence).
+        self._sequence_by_name = {s.name: s for s in self.sequences}
+        # Lookup nom -> Ability : le scan de priorité (_pick_ability) retourne
+        # désormais un Intent (juste un nom + poids), plus l'objet Ability
+        # complet -- ce dict permet à tick() de retrouver cooldown_ms/off_gcd
+        # une fois le gagnant tranché, sans que _pick_ability ait besoin de
+        # transporter l'objet entier dans l'Intent.
+        # EN: name -> Ability lookup: the priority scan (_pick_ability) now
+        # EN: returns an Intent (just a name + weight), not the full Ability
+        # EN: object anymore -- this dict lets tick() retrieve cooldown_ms/
+        # EN: off_gcd once the winner is decided, without _pick_ability having
+        # EN: to carry the whole object inside the Intent.
+        self._ability_by_name = {a.name: a for a in abilities}
 
     def _safe_is_ready(self, *args) -> "tuple[bool, Optional[str]]":
         """Appelle is_ready_fn en isolant ses exceptions. Retourne
@@ -336,7 +746,24 @@ class RotationEngine:
         except Exception as exc:
             return False, f"detection a levé {type(exc).__name__} -- ability sautée ce tick"  # EN: detection raised ... -- ability skipped this tick
 
-    def _pick_ability(self, now: float) -> Optional[Ability]:
+    def _effective_weight(self, intent: Intent) -> float:
+        """Poids RÉEL utilisé pour comparer les Intent entre eux -- poids de
+        base (cf. Intent.weight, fixé par la source : 90/80/50) + l'offset
+        appris pour CETTE ability (cf. self.weight_overrides,
+        load_weight_overrides), déjà clampé à ±MAX_WEIGHT_MODIFIER au
+        chargement. weight_overrides vide (défaut) -> effective_weight ==
+        intent.weight, comportement identique à avant cette fonctionnalité.
+
+        EN: The REAL weight used to compare Intents against each other --
+        EN: base weight (cf. Intent.weight, fixed by the source: 90/80/50) +
+        EN: the learned offset for THIS ability (cf. self.weight_overrides,
+        EN: load_weight_overrides), already clamped to ±MAX_WEIGHT_MODIFIER at
+        EN: load time. Empty weight_overrides (default) -> effective_weight ==
+        EN: intent.weight, identical behavior to before this feature.
+        """
+        return intent.weight + self.weight_overrides.get(intent.ability, 0.0)
+
+    def _pick_ability(self, now: float) -> Optional[Intent]:
         self.state.debug_skip_trace = []
         if now < self.state.hard_lock_until:
             self.state.debug_skip_trace.append(("*", f"hard_lock actif encore {self.state.hard_lock_until - now:.3f}s"))  # EN: hard_lock active for another ...s
@@ -388,8 +815,109 @@ class RotationEngine:
             else:
                 self.state.debug_choice_reason = f"priority={priority}, aucune ability plus prioritaire en lice"  # EN: priority=..., no higher-priority ability in the running
             self.state.debug_skip_trace = []   # une ability a été retenue -- pas de trace à afficher · EN: an ability was selected -- no trace to display
-            return ab
+            # Poids fixe de 50 (cf. Intent) -- la "priorité de base" du YAML.
+            # `ab` reste consultable via self._ability_by_name[ab.name] une
+            # fois le gagnant tranché dans tick() (cooldown_ms/off_gcd).
+            # EN: Fixed weight of 50 (cf. Intent) -- the YAML's "base priority".
+            # EN: `ab` remains reachable via self._ability_by_name[ab.name] once
+            # EN: the winner is decided in tick() (cooldown_ms/off_gcd).
+            return Intent(ability=ab.name, weight=50, source="priority_scan")
         return None
+
+    def _advance_sequence(self, now: float) -> Optional[Intent]:
+        """Sequence Tracker (cf. Sequence/parse_sequences plus haut). Lit/écrit
+        UNIQUEMENT state.sequences (jamais state.hooks -- cf. CombatState :
+        c'est le moteur, pas hooks.py, qui possède cette mémoire).
+
+        Ne fait AVANCER sequence_step que lorsque le step qu'elle propose a
+        RÉELLEMENT gagné la comparaison de poids dans tick() (cf. l'appel à
+        confirm si `winner is sequence_intent`) -- pas au simple moment de la
+        proposition. Tant qu'un pre_tick_hook Python gère encore le même
+        combo (poids 90 > 80), cette méthode peut retourner un Intent qui
+        perd systématiquement sans jamais avancer : la séquence reste
+        "garée" sur le même step, prête à reprendre la main dès que le hook
+        ne propose plus rien pour ce combo précis.
+
+        Si la condition du step courant devient fausse (fenêtre de proc
+        ratée, état qui a dérivé pendant que le hook gérait autre chose), la
+        séquence est purgée plutôt que de rester bloquée à retenter
+        indéfiniment sur un step devenu incohérent -- elle repartira de zéro
+        la prochaine fois que sa condition d'ENTRÉE redeviendra vraie.
+
+        EN: Sequence Tracker (cf. Sequence/parse_sequences above). Reads/writes
+        EN: ONLY state.sequences (never state.hooks -- cf. CombatState: it's
+        EN: the engine, not hooks.py, that owns this memory).
+
+        EN: Only ADVANCES sequence_step when the step it proposes has
+        EN: ACTUALLY won the weight comparison in tick() (cf. the call to
+        EN: confirm if `winner is sequence_intent`) -- not at the mere moment
+        EN: of proposing it. As long as a Python pre_tick_hook still handles
+        EN: the same combo (weight 90 > 80), this method can return an Intent
+        EN: that systematically loses without ever advancing: the sequence
+        EN: stays "parked" on the same step, ready to take over the moment the
+        EN: hook stops proposing anything for this specific combo.
+
+        EN: If the current step's condition becomes false (a missed proc
+        EN: window, state that drifted while the hook handled something
+        EN: else), the sequence is purged rather than staying stuck retrying
+        EN: an now-inconsistent step forever -- it will start fresh next time
+        EN: its ENTRY condition becomes true again.
+        """
+        if not self.sequences:
+            return None
+
+        seq_state = self.state.sequences
+        active_name = seq_state.get("active_sequence")
+
+        if active_name is None:
+            for seq in self.sequences:
+                if evaluate_condition(seq.condition, self.state):
+                    active_name = seq.name
+                    seq_state["active_sequence"] = active_name
+                    seq_state["sequence_step"] = 0
+                    break
+            else:
+                return None
+
+        sequence = self._sequence_by_name.get(active_name)
+        step_index = seq_state.get("sequence_step", 0)
+
+        if sequence is None or step_index >= len(sequence.steps):
+            # Séquence inconnue (ne devrait pas arriver) ou déjà terminée --
+            # purge et laisse la place aux autres sources ce tick.
+            # EN: Unknown sequence (shouldn't happen) or already finished --
+            # EN: purge and make room for the other sources this tick.
+            seq_state.pop("active_sequence", None)
+            seq_state.pop("sequence_step", None)
+            return None
+
+        step = sequence.steps[step_index]
+        if step.condition and not evaluate_condition(step.condition, self.state):
+            seq_state.pop("active_sequence", None)
+            seq_state.pop("sequence_step", None)
+            return None
+
+        off_gcd_step = step.ability in self.off_gcd_hook_abilities
+        if not off_gcd_step and now < self.state.gcd_until:
+            return None   # pas prêt ce tick (GCD) -- retente au prochain, sequence_step inchangé · EN: not ready this tick (GCD) -- retries next tick, sequence_step unchanged
+
+        return Intent(ability=step.ability, weight=80, source=f"sequence:{sequence.name}")
+
+    def _confirm_sequence_step(self) -> None:
+        """Appelée par tick() UNIQUEMENT quand l'Intent d'une séquence a
+        réellement gagné la comparaison de poids ce tick -- avance
+        sequence_step d'une unité. La toute prochaine fois que
+        _advance_sequence est appelée, elle relira ce compteur incrémenté et
+        proposera donc le step SUIVANT (ou purgera la séquence si c'était le
+        dernier).
+
+        EN: Called by tick() ONLY when a sequence's Intent has actually won
+        EN: the weight comparison this tick -- advances sequence_step by one.
+        EN: The very next time _advance_sequence is called, it will read this
+        EN: incremented counter and thus propose the NEXT step (or purge the
+        EN: sequence if that was the last one).
+        """
+        self.state.sequences["sequence_step"] = self.state.sequences.get("sequence_step", 0) + 1
 
     def tick(self) -> Optional[str]:
         """Une itération du moteur. Retourne le nom pressé, ou None.
@@ -401,8 +929,7 @@ class RotationEngine:
         if self.state_update_fn is not None:
             self.state_update_fn(self.state)
 
-        pressed = None
-
+        hook_intents: list[Intent] = []
         if self.pre_tick_hook is not None:
             # Tourne MÊME sous hard_lock -- c'est lui qui détecte la fin de
             # la canalisation et lève le verrou (cf. tariq_pre_tick). Le
@@ -410,40 +937,161 @@ class RotationEngine:
             # EN: Runs EVEN under hard_lock -- it's the hook that detects the end
             # EN: of the channel and releases the lock (cf. tariq_pre_tick). The
             # EN: lock only prevents the PRESS, not detection.
-            pressed = self.pre_tick_hook(self.state)
+            hook_intents = self.pre_tick_hook(self.state)
+
+        # Sequence Tracker (cf. _advance_sequence) : comme le hook, tourne
+        # MÊME sous hard_lock (même raison -- ne bloque que la PRESSE plus
+        # bas) et est TOUJOURS évalué, jamais court-circuité par la présence
+        # d'un hook_intents -- contrairement au scan (_pick_ability), ce
+        # n'est pas un appel coûteux (pas de capture d'écran), rien à gagner
+        # à l'éviter par optimisation.
+        # EN: Sequence Tracker (cf. _advance_sequence): like the hook, runs
+        # EN: EVEN under hard_lock (same reason -- only blocks the PRESS
+        # EN: below) and is ALWAYS evaluated, never short-circuited by the
+        # EN: presence of hook_intents -- unlike the scan (_pick_ability),
+        # EN: this isn't an expensive call (no screen capture), nothing to
+        # EN: gain by skipping it as an optimization.
+        sequence_intent = self._advance_sequence(now)
 
         if now < self.state.hard_lock_until:
             # Canalisation en cours (ex. Hammer Storm) -- bloque TOUTE presse
-            # ce tick, même une ability off_gcd ou une décision du hook.
+            # ce tick, même une ability off_gcd ou une proposition du hook/
+            # d'une séquence.
             # EN: Channel in progress (e.g. Hammer Storm) -- blocks EVERY press
-            # EN: this tick, even an off_gcd ability or a hook decision.
-            pressed = None
+            # EN: this tick, even an off_gcd ability or a hook/sequence proposal.
+            hook_intents = []
+            sequence_intent = None
 
-        if pressed is None:
-            ability = self._pick_ability(now)
-            if ability is not None:
-                pressed = ability.name
-                cooldown_ms = ability.cooldown_ms
-                self.press_fn(pressed)
-                self.state.record_cast(pressed, now, cooldown_ms)
-                if not ability.off_gcd:
-                    self.state.gcd_until = now + self.gcd_ms / 1000.0
+        candidate_intents = list(hook_intents)
+        if sequence_intent is not None:
+            candidate_intents.append(sequence_intent)
+
+        # Le poids EFFECTIF du hook (base 90) ET celui d'un step de séquence
+        # (base 80, cf. Intent) restent construits pour dominer le poids de
+        # base du scan (50, cf. _pick_ability) TANT QU'AUCUN offset appris
+        # n'est en jeu (cf. weight_overrides, Phase 4) -- le résultat de la
+        # comparaison face au scan est alors déjà connu SANS avoir besoin de
+        # l'évaluer.
+        #
+        # COURT-CIRCUIT VOLONTAIRE (pas juste par flemme) : évaluer le scan
+        # ici déclencherait des détections pour rien (ex. chain_lightning
+        # côté Tariq, seule ability du kit encore sans skip_detection -- cf.
+        # config/tariq.yaml) dont le résultat ne serait de toute façon jamais
+        # retenu. Le projet a déjà payé cher ce genre d'appel superflu sur le
+        # thread de décision (cf. CLAUDE.md, plusieurs bugs "bot à la
+        # ramasse" dus à des captures d'écran/YOLO non throttlées).
+        #
+        # GARDE-FOU (2026-07-14, Phase 4 -- tuning appris) : un offset appris
+        # (weight_overrides, ±MAX_WEIGHT_MODIFIER) peut désormais faire
+        # varier CHAQUE poids de ±20. Un hook au pire (90-20=70) reste
+        # TOUJOURS >= le scan au mieux (50+20=70, égalité jamais dépassée) --
+        # mais un STEP DE SÉQUENCE au pire (80-20=60) peut tomber SOUS le
+        # scan au mieux (70) : le court-circuit d'origine deviendrait alors
+        # incorrect. On ne court-circuite donc QUE si le meilleur candidat
+        # "pas cher" (hook/séquence) a déjà un poids effectif au moins égal
+        # au PIRE poids possible du scan -- sinon, on évalue le scan pour de
+        # vrai, par sécurité, avant de trancher.
+        # EN: The hook's EFFECTIVE weight (base 90) AND a sequence step's
+        # EN: (base 80, cf. Intent) stay built to dominate the scan's base
+        # EN: weight (50, cf. _pick_ability) AS LONG AS NO learned offset is in
+        # EN: play (cf. weight_overrides, Phase 4) -- the result of the
+        # EN: comparison against the scan is then already known WITHOUT
+        # EN: needing to evaluate it.
+        # EN:
+        # EN: DELIBERATE SHORT-CIRCUIT (not just laziness): evaluating the
+        # EN: scan here would trigger detections for nothing (e.g.
+        # EN: chain_lightning on the Tariq side, the only ability in the kit
+        # EN: still without skip_detection -- cf. config/tariq.yaml) whose
+        # EN: result would never be kept anyway. The project has already paid
+        # EN: dearly for this kind of superfluous call on the decision thread
+        # EN: (cf. CLAUDE.md, several "bot lags" bugs caused by un-throttled
+        # EN: screen captures/YOLO).
+        # EN:
+        # EN: GUARDRAIL (2026-07-14, Phase 4 -- learned tuning): a learned
+        # EN: offset (weight_overrides, ±MAX_WEIGHT_MODIFIER) can now shift
+        # EN: EACH weight by ±20. A hook at worst (90-20=70) ALWAYS stays >=
+        # EN: the scan at best (50+20=70, a tie never exceeded) -- but a
+        # EN: SEQUENCE STEP at worst (80-20=60) can drop BELOW the scan at
+        # EN: best (70): the original short-circuit would then become
+        # EN: incorrect. So we only short-circuit if the best "cheap"
+        # EN: candidate (hook/sequence) already has an effective weight at
+        # EN: least equal to the scan's WORST possible weight -- otherwise, we
+        # EN: evaluate the scan for real, for safety, before deciding.
+        scan_worst_case_weight = 50 + MAX_WEIGHT_MODIFIER
+        best_cheap_intent = max(candidate_intents, key=self._effective_weight, default=None)
+        best_cheap_weight = self._effective_weight(best_cheap_intent) if best_cheap_intent is not None else float("-inf")
+
+        scan_intent: Optional[Intent] = None
+        if best_cheap_weight >= scan_worst_case_weight:
+            winner = best_cheap_intent
         else:
-            # pressed a été décidé par le pre_tick_hook. On pose un GCD
-            # comme pour n'importe quelle ability, SAUF pour celles listées
-            # comme off-GCD (le finisher) -- sans ça, la 2e pièce du combo
-            # ne bloquait rien et le hook enchaînait bien trop vite par
-            # rapport au vrai jeu (cf. le bug "spam Wind Kick").
-            # EN: pressed was decided by pre_tick_hook. We set a GCD like for any
-            # EN: ability, EXCEPT for those listed as off-GCD (the finisher) --
-            # EN: without it, the combo's 2nd piece blocked nothing and the hook
-            # EN: chained far too fast relative to the real game (cf. the "spam
-            # EN: Wind Kick" bug).
+            scan_intent = self._pick_ability(now)
+            if scan_intent is not None:
+                candidate_intents.append(scan_intent)
+            winner = max(candidate_intents, key=self._effective_weight, default=None)
+
+        pressed: Optional[str] = None
+        gcd_slack_ms = (now - self.state.gcd_until) * 1000.0   # capturé AVANT toute mise à jour de gcd_until ci-dessous -- cf. telemetry plus bas · EN: captured BEFORE any gcd_until update below -- cf. telemetry further down
+
+        if winner is not None and winner is scan_intent:
+            # Le scan a gagné -- soit il n'y avait aucun candidat "pas cher"
+            # (hook/séquence vides, comme avant Phase 3), soit un offset
+            # appris l'a fait passer devant un hook/séquence affaibli (cf.
+            # garde-fou ci-dessus). debug_choice_reason est déjà posé par
+            # _pick_ability lui-même, pas besoin de le refaire ici.
+            # EN: The scan won -- either there was no "cheap" candidate at all
+            # EN: (empty hook/sequence, like before Phase 3), or a learned
+            # EN: offset pushed it ahead of a weakened hook/sequence (cf.
+            # EN: guardrail above). debug_choice_reason is already set by
+            # EN: _pick_ability itself, no need to redo it here.
+            ability = self._ability_by_name[scan_intent.ability]
+            pressed = ability.name
+            cooldown_ms = ability.cooldown_ms
+            self.press_fn(pressed)
+            self.state.record_cast(pressed, now, cooldown_ms)
+            if not ability.off_gcd:
+                self.state.gcd_until = now + self.gcd_ms / 1000.0
+        elif winner is not None:
+            pressed = winner.ability
             self.press_fn(pressed)
             self.state.record_cast(pressed, now, 0)
-            self.state.debug_choice_reason = "décidé par pre_tick_hook (court-circuite le scan de priorité)"  # EN: decided by pre_tick_hook (short-circuits the priority scan)
+            self.state.debug_choice_reason = (
+                f"décidé par {winner.source} (poids={winner.weight}, effectif={self._effective_weight(winner):.1f}, "  # EN: decided by <source> (weight=<weight>, effective=<effective_weight>,
+                f"court-circuite le scan de priorité)"  # EN: short-circuits the priority scan)
+            )
             if pressed not in self.off_gcd_hook_abilities:
                 self.state.gcd_until = now + self.gcd_ms / 1000.0
+            if winner is sequence_intent:
+                # Le step proposé par la séquence a RÉELLEMENT gagné ce tick
+                # (pas juste le hook qui aurait proposé la même ability par
+                # coïncidence -- `is`, comparaison d'identité, pas d'égalité)
+                # -- avance sequence_step. cf. _confirm_sequence_step.
+                # EN: The step proposed by the sequence ACTUALLY won this tick
+                # EN: (not just the hook coincidentally proposing the same
+                # EN: ability -- `is`, identity comparison, not equality) --
+                # EN: advances sequence_step. cf. _confirm_sequence_step.
+                self._confirm_sequence_step()
+
+        if pressed is not None and self.telemetry is not None:
+            # Cf. wardenbot/telemetry.py : self.telemetry est None par défaut
+            # (opt-in, jamais construit par RotationEngine lui-même) -- aucun
+            # comportement/coût pour un appelant qui n'a rien demandé. Le
+            # queue.put() interne est une opération mémoire, jamais d'I/O
+            # disque sur CE thread.
+            # EN: Cf. wardenbot/telemetry.py: self.telemetry is None by default
+            # EN: (opt-in, never built by RotationEngine itself) -- no
+            # EN: behavior/cost for a caller who didn't ask for it. The
+            # EN: internal queue.put() is a memory operation, never disk I/O on
+            # EN: THIS thread.
+            self.telemetry.log_decision(
+                self.state,
+                winner,
+                extra={
+                    "effective_weight": self._effective_weight(winner),
+                    "gcd_slack_ms": gcd_slack_ms,
+                    "choice_reason": self.state.debug_choice_reason,
+                },
+            )
 
         if pressed is not None and self.post_tick_hook is not None:
             self.post_tick_hook(self.state, pressed)
