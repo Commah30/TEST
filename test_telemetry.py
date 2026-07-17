@@ -39,7 +39,11 @@ def test_log_decision_writes_valid_jsonl_entry():
         lines = log_path.read_text(encoding="utf-8").strip().splitlines()
         assert len(lines) == 1
         entry = json.loads(lines[0])
-        assert entry["decision"] == {"ability": "hammer_storm_proc", "weight": 90, "source": "tariq_pre_tick"}
+        # target (2026-07-15, Vigour) : 4e champ d'Intent, None ici -- Tariq ne
+        # cible jamais un allié précis, cf. wardenbot/engine.py::Intent.
+        assert entry["decision"] == {
+            "ability": "hammer_storm_proc", "weight": 90, "source": "tariq_pre_tick", "target": None,
+        }
         assert entry["state_snapshot"]["mode"] == "st"
         assert entry["state_snapshot"]["resources"]["fury"] == 0.62
         assert entry["state_snapshot"]["buffs"]["focused_wrath_empowered"] is True

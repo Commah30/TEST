@@ -144,6 +144,21 @@ class CombatState:
     debuffs: dict = field(default_factory=dict)         # name -> bool, posés par la détection · EN: set by detection
     buffs: dict = field(default_factory=dict)           # name -> bool
     resources: dict = field(default_factory=dict)       # name -> 0.0-1.0
+    # party (2026-07-15, Vigour) : int (slot 1-4) -> {"present": bool,
+    # "hp_pct": Optional[float], "cleanse_needed": bool, "hot_active": bool}.
+    # Champ DÉDIÉ plutôt que fourré dans `detection` ci-dessus : ce dernier
+    # est documenté "name -> bool/float" (valeur scalaire par clé) --
+    # une structure par-allié imbriquée y romprait la convention. Écrit
+    # UNIQUEMENT par state_update.py::make_vigour_state_update_fn, même
+    # discipline que buffs/debuffs/resources.
+    # EN: party (2026-07-15, Vigour): int (slot 1-4) -> {"present": bool,
+    # EN: "hp_pct": Optional[float], "cleanse_needed": bool, "hot_active": bool}.
+    # EN: DEDICATED field rather than stuffed into `detection` above: the
+    # EN: latter is documented as "name -> bool/float" (one scalar value per
+    # EN: key) -- a nested per-ally structure would break that convention.
+    # EN: Written ONLY by state_update.py::make_vigour_state_update_fn, same
+    # EN: discipline as buffs/debuffs/resources.
+    party: dict = field(default_factory=dict)
     health_pct: float = 100.0
     mode: str = "st"                                    # "st"/"cleave"/"aoe", fixé par toi (pas de comptage auto) · EN: set by you (no auto target counting)
     # BUG TROUVÉ EN JEU (2026-07-12) : 6s+ sans une seule presse alors qu'une
@@ -468,6 +483,15 @@ class Intent:
     ability: str
     weight: float
     source: str
+    # target (2026-07-15, Vigour -- ciblage de groupe) : nom logique d'allié
+    # ("player_2", etc.), None par défaut. AUCUN effet sur Meiko/Tariq, qui ne
+    # le renseignent jamais -- cf. RotationEngine.tick(), le press de
+    # ciblage n'est déclenché QUE si ce champ est renseigné.
+    # EN: target (2026-07-15, Vigour -- party targeting): logical ally name
+    # EN: ("player_2", etc.), None by default. NO effect on Meiko/Tariq, who
+    # EN: never set it -- cf. RotationEngine.tick(), the target-select press
+    # EN: only fires if this field is set.
+    target: Optional[str] = None
 
 
 # =============================================================================
@@ -1032,6 +1056,36 @@ class RotationEngine:
 
         pressed: Optional[str] = None
         gcd_slack_ms = (now - self.state.gcd_until) * 1000.0   # capturé AVANT toute mise à jour de gcd_until ci-dessous -- cf. telemetry plus bas · EN: captured BEFORE any gcd_until update below -- cf. telemetry further down
+
+        # Ciblage de groupe (2026-07-15, Vigour) : si l'Intent gagnant vise un
+        # allié précis, presse la touche de ciblage AVANT le sort lui-même,
+        # dans le MÊME tick -- toujours, sans condition (pas de "déjà
+        # sélectionné ?" trackée : une croyance interne peut désynchroniser du
+        # jeu réel -- ex. le joueur clique un autre allié -- et rien n'est
+        # lisible à l'écran pour la confirmer, cf. discussion architecture
+        # Vigour). Hors du système Ability/YAML : ni cooldown, ni GCD, ni
+        # record_cast -- juste une touche de plus (profiles/*/config.json
+        # ::keybinds, jamais dans abilities:). Zéro effet pour Meiko/Tariq,
+        # qui ne renseignent jamais Intent.target.
+        # EN: Party targeting (2026-07-15, Vigour): if the winning Intent
+        # EN: targets a specific ally, press the target-select key BEFORE the
+        # EN: spell itself, in the SAME tick -- always, unconditionally (no
+        # EN: "already selected?" tracking: an internal belief can desync from
+        # EN: the real game -- e.g. the player clicks another ally -- and
+        # EN: nothing on screen can confirm it, cf. Vigour architecture
+        # EN: discussion). Outside the Ability/YAML system: no cooldown, no
+        # EN: GCD, no record_cast -- just one more key (profiles/*/config.json
+        # EN: ::keybinds, never in abilities:). Zero effect for Meiko/Tariq,
+        # EN: who never set Intent.target.
+        if winner is not None and winner.target is not None:
+            target_key_name = f"target_{winner.target}"
+            self.press_fn(target_key_name)
+            if self.telemetry is not None:
+                self.telemetry.log_decision(
+                    self.state,
+                    Intent(ability=target_key_name, weight=winner.weight, source="target_resolver", target=winner.target),
+                    extra={"resolved_for": winner.ability},
+                )
 
         if winner is not None and winner is scan_intent:
             # Le scan a gagné -- soit il n'y avait aucun candidat "pas cher"

@@ -188,6 +188,48 @@ def test_stack_counter_tracks_real_spend_combos_not_visual_badge():
     print("Vortex empowered casté -> compteur remis à 0 :", seq)
 
 
+def test_warden_empowerment_alternates_between_vortex_and_strikes():
+    """DEMANDE DE L'UTILISATEUR (2026-07-16) : forcer TOUJOURS Spirited Vortex à
+    3 stacks n'est plus la règle voulue -- la cible du forçage doit ALTERNER
+    entre Vortex et Strikes à chaque nouvelle activation des 3 stacks : 1re
+    activation -> Vortex (comportement d'origine conservé), 2e -> Strikes,
+    3e -> Vortex, etc. cf. warden_empower_target dans hooks.py."""
+    state = CombatState()
+    # Les deux buffs restent up tout du long -- seul le forçage à 3 stacks
+    # doit rouvrir le combo défensif ici, jamais un buff manquant.
+    state.buffs["spirited_vortex"] = True
+    state.buffs["spirited_strikes"] = True
+
+    def build_three_stacks() -> None:
+        state.resources["stormfall"] = 1.0
+        drive_combo(state, "wind_kick")  # 1 stack
+        drive_combo(state, "wind_kick")  # 2 stacks
+        drive_combo(state, "wind_kick")  # 3 stacks
+        assert state.hooks.get("warden_stacks") == 3, state.hooks
+        state.resources["stormfall"] = 0.0
+
+    build_three_stacks()
+    seq1 = drive_combo(state, "spirit_palm")
+    assert seq1 == ["spirit_palm", "earth_fist_2", "fighting_techniques"], seq1
+    assert state.hooks.get("warden_stacks") == 0, state.hooks
+    print("1re activation des 3 stacks -> Vortex (comportement d'origine conservé) :", seq1)
+
+    build_three_stacks()
+    seq2 = drive_combo(state, "spirit_palm")
+    assert seq2 == ["spirit_palm", "wind_kick_2", "fighting_techniques"], (
+        f"2e activation -> Strikes attendu (alternance), reçu {seq2!r}"
+    )
+    assert state.hooks.get("warden_stacks") == 0, state.hooks
+    print("2e activation des 3 stacks -> Strikes (alternance) :", seq2)
+
+    build_three_stacks()
+    seq3 = drive_combo(state, "spirit_palm")
+    assert seq3 == ["spirit_palm", "earth_fist_2", "fighting_techniques"], (
+        f"3e activation -> retour à Vortex attendu, reçu {seq3!r}"
+    )
+    print("3e activation des 3 stacks -> retour à Vortex :", seq3)
+
+
 def test_visual_debuff_detection_is_ignored_for_stack_counting():
     """Testé en jeu : state.debuffs["warden_of_the_temple_3"] reste souvent
     bloqué à True en continu (détection peu fiable, cf. hooks.py). Un
@@ -806,12 +848,60 @@ def test_earthfist_barrage_fires_again_when_one_orb_still_remains():
     print("Earthfist Barrage refeu bien tant qu'il reste au moins un orbe d'Earthfall (même fix, cohérence).")
 
 
+def test_intent_target_triggers_a_target_select_press_before_the_ability():
+    """Ciblage de groupe (2026-07-15, Vigour) -- si l'Intent gagnant renseigne
+    `target`, RotationEngine.tick() doit presser 'target_<target>' AVANT
+    l'ability elle-même, dans le MÊME tick, sans lui faire perdre son
+    cooldown/GCD normal (cf. discussion architecture Vigour, point 1)."""
+    pressed_names: list[str] = []
+
+    def hook(state):
+        return [Intent(ability="burst_heal", weight=90, source="test_hook", target="player_2")]
+
+    engine = RotationEngine(
+        abilities=[],
+        state=CombatState(mode="st"),
+        press_fn=lambda name: pressed_names.append(name),
+        is_ready_fn=lambda name, threshold=None: True,
+        pre_tick_hook=hook,
+    )
+    pressed = engine.tick()
+    assert pressed == "burst_heal", f"tick() doit retourner le sort, pas la touche de ciblage, reçu {pressed!r}"
+    assert pressed_names == ["target_player_2", "burst_heal"], (
+        f"la touche de ciblage doit partir AVANT le sort, dans cet ordre, reçu {pressed_names!r}"
+    )
+    print("Intent.target déclenche bien un press de ciblage avant le sort, dans le même tick.")
+
+
+def test_intent_without_target_presses_only_the_ability_unchanged():
+    """Non-régression : Meiko/Tariq ne renseignent jamais Intent.target --
+    aucun press de ciblage ne doit apparaître, comportement identique à avant
+    l'ajout du champ."""
+    pressed_names: list[str] = []
+
+    def hook(state):
+        return [Intent(ability="hook_winner", weight=90, source="test_hook")]   # target implicite = None
+
+    engine = RotationEngine(
+        abilities=[],
+        state=CombatState(mode="st"),
+        press_fn=lambda name: pressed_names.append(name),
+        is_ready_fn=lambda name, threshold=None: True,
+        pre_tick_hook=hook,
+    )
+    pressed = engine.tick()
+    assert pressed == "hook_winner"
+    assert pressed_names == ["hook_winner"], f"aucune touche de ciblage attendue, reçu {pressed_names!r}"
+    print("Intent sans target -- comportement inchangé, aucun press de ciblage parasite.")
+
+
 if __name__ == "__main__":
     test_default_opens_when_buffs_missing()
     test_default_picks_whichever_buff_is_missing()
     test_three_stacks_forces_vortex_even_if_strikes_is_missing()
     test_full_sequence_matches_user_example()
     test_stack_counter_tracks_real_spend_combos_not_visual_badge()
+    test_warden_empowerment_alternates_between_vortex_and_strikes()
     test_visual_debuff_detection_is_ignored_for_stack_counting()
     test_stack_timeout_forces_recalibration()
     test_storm_loop_not_interrupted_by_mid_loop_buff_drop()
@@ -833,4 +923,6 @@ if __name__ == "__main__":
     test_defensive_combo_reopens_once_pending_window_truly_expires()
     test_lashing_stormkick_fires_again_when_one_orb_still_remains()
     test_earthfist_barrage_fires_again_when_one_orb_still_remains()
+    test_intent_target_triggers_a_target_select_press_before_the_ability()
+    test_intent_without_target_presses_only_the_ability_unchanged()
     print("\nTous les tests passent.")

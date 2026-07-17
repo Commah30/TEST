@@ -35,6 +35,10 @@
         "skull_crusher_proc": "4"
       },
       "regions": {}
+    },
+    "vigour": {
+      "keybinds": {},
+      "regions": {}
     }
   }
 }

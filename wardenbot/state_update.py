@@ -22,7 +22,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from wardenbot.bar_reader import read_fill_pct
+from wardenbot.bar_reader import read_fill_pct, read_fill_pct_colorless
 from wardenbot.capture import ScreenCapture
 from wardenbot.diagnostics import CAPTURE_WATCHDOG_THRESHOLD_S, log_error, log_pipeline_diagnostic, log_slow_call
 from wardenbot.engine import CombatState
@@ -1099,5 +1099,513 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
         # EN: buffs specifically (throttled independently).
         state.detection_meta["tariq_bars"] = DetectionMeta(created_at=snap.created_at)
         state.detection_meta["tariq_yolo"] = DetectionMeta(created_at=snap.yolo_created_at)
+
+    return state_update_fn
+
+
+# =============================================================================
+# VIGOUR (Healer) -- Phase 1 de l'industrialisation Vigour (2026-07-15, cf.
+# discussion architecture : Targeting/CombatState/Hooks/YAML). Lecture des 4
+# emplacements du cadre de groupe (party frames) : HP% via barre de
+# remplissage (wardenbot/bar_reader.py, même fonction déjà utilisée pour
+# rage_bar/hammer_storm_cast_bar), cleanse via template d'icône de debuff.
+#
+# SYNCHRONE, PAS de thread de détection dédié comme Meiko/Tariq : ceux-ci n'en
+# ont un que parce qu'un problème réel de perf/fiabilité l'a justifié après
+# coup (cf. CLAUDE.md, bug #3 -- spam défensif dû à une ESTIMATION au lieu
+# d'une détection réelle ; le thread YOLO Meiko est venu encore plus tard,
+# 2026-07-16, pour un problème de fiabilité différent). Rien ne prouve qu'un
+# thread séparé soit nécessaire ici avant même la première calibration en jeu
+# -- à réévaluer via capture_watchdog.log si les cycles s'avèrent trop lents.
+# EN: VIGOUR (Healer) -- Phase 1 of the Vigour industrialization (2026-07-15,
+# EN: cf. architecture discussion: Targeting/CombatState/Hooks/YAML). Reads
+# EN: the 4 party-frame slots: HP% via fill bar (wardenbot/bar_reader.py, the
+# EN: same function already used for rage_bar/hammer_storm_cast_bar), cleanse
+# EN: via a debuff-icon template.
+# EN:
+# EN: SYNCHRONOUS, NO dedicated detection thread like Meiko/Tariq: those only
+# EN: got one because a real perf/reliability problem justified it after the
+# EN: fact (cf. CLAUDE.md, bug #3 -- defensive spam caused by an ESTIMATE
+# EN: instead of a real detection; Meiko's YOLO thread came even later,
+# EN: 2026-07-16, for a different reliability problem). Nothing proves a
+# EN: separate thread is needed here before even the first in-game
+# EN: calibration -- re-evaluate via capture_watchdog.log if cycles prove too
+# EN: slow.
+# =============================================================================
+VIGOUR_PARTY_FRESHNESS_POLICY = FreshnessPolicy(fresh_ms=100, stale_ms=400)   # lecture synchrone à chaque tick (~30Hz, cf. CHARACTERS["vigour"]["tick_hz"]) -- valeurs de départ, PAS encore validées en jeu (même statut que les autres FreshnessPolicy de ce fichier) · EN: synchronous read every tick (~30Hz, cf. CHARACTERS["vigour"]["tick_hz"]) -- starting values, NOT yet validated in-game (same status as this file's other FreshnessPolicy)
+
+PARTY_SLOTS = (1, 2, 3, 4)
+
+# MESURÉ (2026-07-15, analyse de C:\Users\Herma\Videos\Captures\fellowship
+# 2026-07-15 19-23-21.mp4, 2560x1440, cf. templates/vigour/HP_party*.png) --
+# PAS un placeholder : chaque emplacement de groupe a sa PROPRE couleur de
+# remplissage (thème par personnage/rôle : Buxtonox=orange, SoW=bleu,
+# Merim=rouge, Commah=blanc-crème pour le joueur lui-même), contrairement à
+# rage_bar/hammer_storm_cast_bar (Tariq) qui n'ont qu'une seule couleur fixe.
+# UNE VALEUR PAR SLOT NUMÉRIQUE (1-4), PAS par nom de joueur -- l'ordre des
+# slots dans le cadre de groupe est un fait d'UI (position gauche->droite),
+# jamais lié à qui est effectivement dans le groupe ce jour-là.
+#
+# RISQUE CONNU (pas caché) : party_3 (rouge sombre, BGR~(25,17,67)) a une
+# luminosité globale proche du fond d'écran sombre (~(40-50,35-40,38-40) BGR
+# mesuré sur cette même vidéo) -- moins de marge de séparation que
+# party_1/2/4, contrairement à ces derniers nettement plus saturés/lumineux.
+# À valider en jeu avant de faire confiance à sa lecture dans un vrai combat
+# (cf. checklist calibration -- action manuelle, pas résolu ici).
+# EN: MEASURED (2026-07-15, analysis of C:\Users\Herma\Videos\Captures\
+# EN: fellowship 2026-07-15 19-23-21.mp4, 2560x1440, cf.
+# EN: templates/vigour/HP_party*.png) -- NOT a placeholder: each party slot
+# EN: has its OWN fill color (per-character/role theme: Buxtonox=orange,
+# EN: SoW=blue, Merim=red, Commah=cream-white for the player himself), unlike
+# EN: rage_bar/hammer_storm_cast_bar (Tariq) which only have one fixed color.
+# EN: ONE VALUE PER NUMERIC SLOT (1-4), NOT per player name -- slot order in
+# EN: the party frame is a UI fact (left->right position), never tied to who
+# EN: actually is in the group on a given day.
+# EN:
+# EN: KNOWN RISK (not hidden): party_3 (dark red, BGR~(25,17,67)) has overall
+# EN: brightness close to the dark screen background (~(40-50,35-40,38-40)
+# EN: BGR measured on this same video) -- less separation margin than
+# EN: party_1/2/4, which are clearly more saturated/bright by comparison. To
+# EN: validate in-game before trusting its reading in a real fight (cf.
+# EN: calibration checklist -- manual action, not resolved here).
+# DÉCOUVERTE CRITIQUE (2026-07-15, 2e vidéo analysée : fellowship
+# 2026-07-15 22-45-35.mp4, même résolution, groupe DIFFÉRENT) : ces couleurs
+# NE SONT PAS FIXES PAR SLOT. Vidéo 1 (Buxtonox/SoW/Merim/Commah) : slot1
+# orange, slot2 bleu, slot3 rouge, slot4 blanc. Vidéo 2 (Elayra/Kaschy/Roxo/
+# Commah) : slot1 beige, slot2 orange, slot3 bleu, slot4 blanc -- l'orange et
+# le bleu ont changé de SLOT d'une session à l'autre. Seul slot4 (le joueur
+# lui-même) reste blanc-crème dans les deux vidéos -- probablement une
+# convention stable ("ma propre frame"), pas une coïncidence.
+#
+# Conséquence directe : les valeurs ci-dessous ne sont fiables QUE pour une
+# session avec exactement CETTE composition de groupe -- une nouvelle
+# composition change les couleurs et casse ces lectures silencieusement
+# (aucune erreur levée, juste un mauvais %). Essayé un détecteur générique
+# par SATURATION (cf. wardenbot/bar_reader.py::read_fill_pct_by_saturation,
+# ajouté pour cette raison) à la place d'une couleur fixe : fonctionne bien
+# pour les couleurs vives (orange/bleu) mais PAS pour le rouge sombre (marge
+# de saturation trop faible, cf. RISQUE CONNU plus bas) ni pour le blanc/crème
+# du joueur (saturation nulle PAR DÉFINITION -- indiscernable du fond
+# désaturé). Aucune des deux approches ne couvre les 4 slots de façon fiable
+# à ce stade -- cf. la recommandation OCR plus bas (VIGOUR_HP_ICON_OFFSET_FRAC),
+# qui reste la vraie piste plutôt que continuer à ajuster des seuils au cas
+# par cas.
+# EN: CRITICAL DISCOVERY (2026-07-15, 2nd video analyzed: fellowship
+# EN: 2026-07-15 22-45-35.mp4, same resolution, DIFFERENT group): these
+# EN: colors are NOT fixed per slot. Video 1 (Buxtonox/SoW/Merim/Commah):
+# EN: slot1 orange, slot2 blue, slot3 red, slot4 white. Video 2 (Elayra/
+# EN: Kaschy/Roxo/Commah): slot1 tan, slot2 orange, slot3 blue, slot4 white --
+# EN: orange and blue swapped SLOTS between sessions. Only slot4 (the player
+# EN: himself) stays cream-white in both videos -- likely a stable
+# EN: convention ("my own frame"), not a coincidence.
+# EN:
+# EN: Direct consequence: the values below are ONLY reliable for a session
+# EN: with exactly THIS group composition -- a new composition changes the
+# EN: colors and silently breaks these readings (no error raised, just a
+# EN: wrong %). Tried a generic SATURATION-based detector (cf.
+# EN: wardenbot/bar_reader.py::read_fill_pct_by_saturation, added for this
+# EN: reason) instead of a fixed color: works well for vivid colors (orange/
+# EN: blue) but NOT for dark red (saturation margin too thin, cf. KNOWN RISK
+# EN: below) nor for the player's own white/cream (zero saturation BY
+# EN: DEFINITION -- indistinguishable from the desaturated background).
+# EN: Neither approach reliably covers all 4 slots at this stage -- cf. the
+# EN: OCR recommendation below (VIGOUR_HP_ICON_OFFSET_FRAC), which remains the
+# EN: real path forward rather than continuing to tune thresholds case by
+# EN: case.
+VIGOUR_HP_BAR_FILL_BGR: "dict[int, tuple[int, int, int]]" = {
+    1: (41, 77, 158),    # orange/or
+    2: (174, 44, 22),    # bleu
+    3: (25, 17, 67),     # rouge sombre -- cf. RISQUE CONNU ci-dessus
+    4: (153, 172, 171),  # blanc-crème (frame du joueur lui-même)
+}
+
+# BUG TROUVÉ EN TESTANT CE MODULE CONTRE DE VRAIS PIXELS (2026-07-15, pas en
+# jeu -- avant tout envoi) : un premier passage lisait 0.0% pour les 4 barres
+# alors que la vidéo montrait 85/100/93/100%. Root cause : le portrait/icône
+# de chaque membre est dessiné PAR-DESSUS le début (~25% gauche) de sa propre
+# barre de vie -- read_fill_pct (direction="ltr") scanne depuis la gauche et
+# rencontre immédiatement les couleurs de l'icône, pas celles de la barre,
+# et abandonne dès que max_gap est dépassé (bien avant la vraie fin du
+# remplissage). Confirmé par calcul sur 3 valeurs connues de la vidéo
+# (party_1 à 85%/47%/45% -- cf. rapport d'analyse) : la frontière colorée
+# réelle se déplace de façon cohérente avec le %, mais SEULEMENT dans la
+# portion visible après l'icône.
+#
+# ICON_OFFSET_FRAC = fraction de la largeur totale couverte par l'icône,
+# mesurée sur party_1 (~24-27% selon les 3 points de calibration) -- PAS
+# revérifiée indépendamment sur party_2/3/4 (même gabarit d'UI supposé,
+# jamais confirmé). CONSÉQUENCE CONNUE, PAS CACHÉE : toute vraie valeur de vie
+# EN DESSOUS de ~25% est indiscernable (la frontière de remplissage recule
+# derrière l'icône, invisible) -- la lecture plafonne à ICON_OFFSET_FRAC au
+# lieu de continuer à baisser. C'est exactement la plage la plus critique
+# pour Vigour (burst_heal se déclenche sous 30%, cf. hooks.py::vigour_pre_tick)
+# -- limitation réelle à corriger via OCR du pourcentage affiché (même
+# principe que wardenbot/ocr.py::read_countdown_seconds pour Meiko) plutôt
+# que de prétendre que cette lecture par couleur suffit dans cette zone.
+# EN: BUG FOUND WHILE TESTING THIS MODULE AGAINST REAL PIXELS (2026-07-15,
+# EN: not in-game -- before shipping). A first pass read 0.0% for all 4 bars
+# EN: while the video showed 85/100/93/100%. Root cause: each member's
+# EN: portrait/icon is drawn OVER the start (~left 25%) of their own health
+# EN: bar -- read_fill_pct (direction="ltr") scans from the left and
+# EN: immediately hits the icon's colors, not the bar's, and gives up once
+# EN: max_gap is exceeded (well before the real end of the fill). Confirmed
+# EN: by computing against 3 known values from the video (party_1 at
+# EN: 85%/47%/45% -- cf. analysis report): the real color boundary moves
+# EN: consistently with %, but ONLY in the portion visible past the icon.
+# EN:
+# EN: ICON_OFFSET_FRAC = fraction of the total width covered by the icon,
+# EN: measured on party_1 (~24-27% across the 3 calibration points) -- NOT
+# EN: independently re-verified on party_2/3/4 (same UI template assumed,
+# EN: never confirmed). KNOWN CONSEQUENCE, NOT HIDDEN: any true HP value
+# EN: BELOW ~25% is indistinguishable (the fill boundary retreats behind the
+# EN: icon, invisible) -- the reading floors at ICON_OFFSET_FRAC instead of
+# EN: continuing to drop. This is exactly Vigour's most critical range
+# EN: (burst_heal fires under 30%, cf. hooks.py::vigour_pre_tick) -- a real
+# EN: limitation to fix via OCR of the displayed percentage (same principle
+# EN: as wardenbot/ocr.py::read_countdown_seconds for Meiko) rather than
+# EN: pretending this color read is sufficient in that zone.
+# MIS À JOUR (2026-07-15, 2e itération -- read_fill_pct_colorless, cf.
+# bar_reader.py) : le paragraphe ci-dessus décrivait les limites de
+# l'ANCIENNE approche (VIGOUR_HP_BAR_FILL_BGR, une couleur fixe par slot) --
+# obsolète depuis que _read_party_hp_pct utilise read_fill_pct_colorless
+# (saturation OU luminance OU dominance rouge). État réel, testé sur les 2
+# vidéos (12 lectures, 4 slots x 3 frames par vidéo) après ce changement :
+# - party_1 : fiable, ±6pt.
+# - party_2 : fiable dans la majorité des cas testés, quelques lectures
+#   bloquées (~76-77%) sur certaines frames de la 1re vidéo -- pas
+#   entièrement résolu, mais nettement moins cassé qu'avant (n'était JAMAIS
+#   correct auparavant).
+# - party_3 (rouge sombre) : DÉBLOQUÉ par la condition R-G>20 (cf.
+#   bar_reader.py) -- passé de "bloqué en permanence au plancher icône" à
+#   des lectures correctes à quelques points près (93/100/75/66% mesurés).
+# - party_4 (blanc, le joueur) : fiable sur les cas à vie haute ; sur un
+#   joueur réellement MORT (0%), lit le plancher icône (~25%) -- PAS un
+#   faux positif "plein de vie" comme le donnait un scan droite->gauche
+#   naïf testé en parallèle (95%+ mesuré sur un mort, cf. bar_reader.py).
+#
+# Reste un angle mort partiel sur party_2 dans certains cas -- pas un blocage
+# total comme avant, mais pas encore une garantie à 100%. Si un signal de
+# correction périodique s'avère nécessaire pour ce cas résiduel, le pattern
+# à suivre est un OCR CIBLÉ ET ASYNCHRONE déclenché seulement quand la
+# lecture pixel est suspecte (ex: bloquée pile au plancher ICON_OFFSET_FRAC,
+# ou saut brutal d'un tick à l'autre) -- pas un OCR systématique sur les 4
+# slots à chaque tick : un flag dans CombatState (ex.
+# state.hooks["party_N_needs_ocr_check"]) posé par le scan rapide, consommé
+# par un thread OCR dédié qui ne réévalue QUE le(s) slot(s) suspect(s), à
+# basse fréquence -- même philosophie que les threads de détection Meiko/
+# Tariq (rapide et continu) + OCR (rare et ciblé, jamais sur le chemin
+# critique de décision). Pas implémenté à ce stade -- le gain net face au
+# taux de réussite actuel n'a pas encore justifié cette complexité
+# supplémentaire.
+# EN: UPDATED (2026-07-15, 2nd iteration -- read_fill_pct_colorless, cf.
+# EN: bar_reader.py): the paragraph above described the limits of the OLD
+# EN: approach (VIGOUR_HP_BAR_FILL_BGR, one fixed color per slot) --
+# EN: obsolete since _read_party_hp_pct uses read_fill_pct_colorless
+# EN: (saturation OR luminance OR red dominance). Real state, tested on both
+# EN: videos (12 readings, 4 slots x 3 frames per video) after this change:
+# EN: - party_1: reliable, within ±6pt.
+# EN: - party_2: reliable in most tested cases, a few readings stuck
+# EN:   (~76-77%) on some frames of the 1st video -- not fully resolved, but
+# EN:   markedly less broken than before (was NEVER correct before).
+# EN: - party_3 (dark red): UNBLOCKED by the R-G>20 condition (cf.
+# EN:   bar_reader.py) -- went from "permanently stuck at the icon floor" to
+# EN:   readings correct within a few points (93/100/75/66% measured).
+# EN: - party_4 (white, the player): reliable at high HP; on a genuinely DEAD
+# EN:   player (0%), reads the icon floor (~25%) -- NOT a "full health" false
+# EN:   positive like a naive right-to-left scan gave in parallel testing
+# EN:   (95%+ measured on a dead player, cf. bar_reader.py).
+# EN:
+# EN: A partial blind spot remains on party_2 in some cases -- not a total
+# EN: block like before, but not yet a 100% guarantee either. If a periodic
+# EN: correction signal turns out to be needed for this residual case, the
+# EN: pattern to follow is a TARGETED, ASYNCHRONOUS OCR triggered only when
+# EN: the pixel reading looks suspect (e.g. stuck exactly at the
+# EN: ICON_OFFSET_FRAC floor, or a sudden jump between ticks) -- not a
+# EN: systematic OCR on all 4 slots every tick: a flag in CombatState (e.g.
+# EN: state.hooks["party_N_needs_ocr_check"]) set by the fast scan, consumed
+# EN: by a dedicated OCR thread that only re-evaluates the suspect slot(s),
+# EN: at low frequency -- same philosophy as the Meiko/Tariq detection
+# EN: threads (fast and continuous) + OCR (rare and targeted, never on the
+# EN: critical decision path). Not implemented at this stage -- the net gain
+# EN: over the current success rate hasn't justified this extra complexity
+# EN: yet.
+VIGOUR_HP_ICON_OFFSET_FRAC = 0.25
+
+
+def _read_party_hp_pct(frame) -> float:
+    """Lit le % de vie réel en corrigeant l'icône qui recouvre le début de
+    la barre (cf. VIGOUR_HP_ICON_OFFSET_FRAC ci-dessus) : ignore cette
+    portion pour le scan, puis reprojette le résultat sur l'échelle complète
+    -- PAS un recadrage de la capture (une seule région calibrée par slot,
+    cf. profiles/*/config.json), juste un slice numpy sur le frame déjà
+    capturé.
+
+    read_fill_pct_colorless (2026-07-15, 2e itération -- cf. bar_reader.py
+    pour le détail complet) plutôt qu'une couleur fixe par slot (1re
+    itération, VIGOUR_HP_BAR_FILL_BGR, ci-dessus) : les couleurs de classe ne
+    sont PAS stables d'une session à l'autre (vérifié sur 2 vidéos réelles),
+    donc une couleur codée en dur casse silencieusement dès que la
+    composition du groupe change. VIGOUR_HP_BAR_FILL_BGR reste dans ce
+    fichier pour référence/diagnostic (comparer une lecture couleur-fixe à
+    une lecture générique peut aider à débugger un cas litigieux), mais
+    n'est plus utilisé pour la décision.
+
+    EN: Reads the real HP% correcting for the icon covering the bar's start
+    EN: (cf. VIGOUR_HP_ICON_OFFSET_FRAC above): skips that portion for the
+    EN: scan, then reprojects the result onto the full scale -- NOT a recrop
+    EN: of the capture (one calibrated region per slot, cf.
+    EN: profiles/*/config.json), just a numpy slice on the already-captured
+    EN: frame.
+
+    EN: read_fill_pct_colorless (2026-07-15, 2nd iteration -- cf.
+    EN: bar_reader.py for the full detail) rather than a fixed color per slot
+    EN: (1st iteration, VIGOUR_HP_BAR_FILL_BGR, above): class colors are NOT
+    EN: stable across sessions (verified on 2 real videos), so a hardcoded
+    EN: color silently breaks the moment the group composition changes.
+    EN: VIGOUR_HP_BAR_FILL_BGR stays in this file for reference/diagnostics
+    EN: (comparing a fixed-color read against the generic one can help debug
+    EN: a disputed case), but is no longer used for the decision.
+    """
+    icon_px = int(frame.shape[1] * VIGOUR_HP_ICON_OFFSET_FRAC)
+    narrow_frac = read_fill_pct_colorless(
+        frame[:, icon_px:], saturation_threshold=50, luminance_threshold=90, direction="ltr", max_gap=4
+    )
+    return VIGOUR_HP_ICON_OFFSET_FRAC + (1 - VIGOUR_HP_ICON_OFFSET_FRAC) * narrow_frac
+
+# MESURÉ (même vidéo, cf. templates/vigour/orb_bar.png) -- 6 pips discrets
+# (PAS une barre à remplissage continu comme HP/mana), qui s'allument un par
+# un de gauche à droite. Centres en x trouvés par profil de luminosité
+# colonne par colonne (pics nets, espacement régulier ~28px) -- PAS une
+# extrapolation, mesurés directement sur les 6 positions. y=900-932 englobe
+# à la fois le halo d'un pip allumé (pic mesuré à y=908) et l'icône plus
+# sombre d'un pip éteint (pic mesuré vers y=919-930) -- fenêtre large
+# délibérément pour couvrir les deux cas plutôt qu'une bande fine qui
+# fonctionnerait pour l'un et raterait l'autre.
+# EN: MEASURED (same video, cf. templates/vigour/orb_bar.png) -- 6 discrete
+# EN: pips (NOT a continuous fill bar like HP/mana), lit one by one left to
+# EN: right. X centers found via column-by-column brightness profiling (clean
+# EN: peaks, regular ~28px spacing) -- NOT an extrapolation, measured
+# EN: directly at all 6 positions. y=900-932 covers both a lit pip's glow
+# EN: (peak measured at y=908) and an unlit pip's darker icon (peak measured
+# EN: around y=919-930) -- deliberately wide window to cover both cases
+# EN: rather than a thin band that would work for one and miss the other.
+VIGOUR_ORB_PIP_X_CENTERS = (10, 40, 68, 96, 123, 151)   # relatifs au coin haut-gauche de la région orb_bar calibrée (absolus mesurés : 436,466,494,522,549,577, region.left=426) · EN: relative to the calibrated orb_bar region's top-left corner (measured absolutes: 436,466,494,522,549,577, region.left=426)
+VIGOUR_ORB_PIP_HALF_WIDTH = 10
+VIGOUR_ORB_PIP_HEIGHT = 32   # top vient de la région calibrée elle-même (base_top) -- pas de 2e constante à tenir synchronisée · EN: top comes from the calibrated region itself (base_top) -- no 2nd constant to keep in sync
+# MOYENNE de luminosité sur toute la fenêtre du pip, PAS le maximum -- testé
+# en jeu réel (frame vidéo) : un pip ÉTEINT peut contenir un unique pixel
+# parasite (reflet/artefact de compression) dépassant 150 en luminosité
+# max alors que sa MOYENNE reste ~44 -- un seuil sur le max seul donnait un
+# faux positif. Pip allumé mesuré : moyenne ~84 ; pips éteints mesurés :
+# moyenne ~43-45 -- marge large, un seuil à 60 sépare proprement les deux.
+# EN: AVERAGE brightness over the whole pip window, NOT the maximum -- tested
+# EN: on a real video frame: an UNLIT pip can contain a single stray pixel
+# EN: (reflection/compression artifact) exceeding 150 in max brightness while
+# EN: its AVERAGE stays ~44 -- a max-only threshold gave a false positive.
+# EN: Lit pip measured: average ~84; unlit pips measured: average ~43-45 --
+# EN: wide margin, a threshold of 60 cleanly separates the two.
+VIGOUR_ORB_LIT_BRIGHTNESS_THRESHOLD = 60
+
+# MESURÉ depuis templates/vigour/mana_bar.png (dégradé cyan/blanc, glossy --
+# valeur prise près du bord, pas au centre du reflet le plus clair). Couleur
+# fiable ; PAS sa POSITION à l'écran -- non localisée avec confiance dans la
+# vidéo fournie (zone testée autour des pips d'orbes : rien trouvé à cette
+# frame précise, probablement une jauge proche de vide à ce moment précis).
+# region absente tant que non calibrée (cf. capture_helper.py mark) --
+# state_update_fn saute la lecture plutôt que de deviner une position.
+# EN: MEASURED from templates/vigour/mana_bar.png (cyan/white glossy
+# EN: gradient -- value taken near the edge, not the brightest highlight).
+# EN: Color is reliable; its ON-SCREEN POSITION is NOT -- not confidently
+# EN: located in the supplied video (area tested around the orb pips: nothing
+# EN: found at that specific frame, likely a near-empty gauge at that
+# EN: moment). Region absent until calibrated (cf. capture_helper.py mark) --
+# EN: state_update_fn skips the read rather than guessing a position.
+VIGOUR_MANA_BAR_FILL_BGR = (253, 190, 0)
+
+
+def count_lit_orb_pips(capturer: ScreenCapture, base_left: int, base_top: int) -> int:
+    """Compte les pips allumés parmi les 6 (cf. VIGOUR_ORB_PIP_X_CENTERS) --
+    PAS un read_fill_pct (ceux-ci sont discrets, pas un dégradé continu).
+    base_left/base_top : coin haut-gauche de la région orb_bar calibrée (cf.
+    profiles/*/config.json) -- les centres de pips mesurés ci-dessus sont
+    relatifs au cadrage de capture original, recalés ici par différence
+    plutôt que codés en dur sur des coordonnées absolues, pour rester valable
+    si la région calibrée bouge légèrement.
+
+    EN: Counts lit pips among the 6 (cf. VIGOUR_ORB_PIP_X_CENTERS) -- NOT a
+    EN: read_fill_pct (these are discrete, not a continuous gradient).
+    EN: base_left/base_top: top-left corner of the calibrated orb_bar region
+    EN: (cf. profiles/*/config.json) -- the pip centers measured above are
+    EN: relative to the original capture framing, re-anchored here by
+    EN: difference rather than hardcoded on absolute coordinates, to stay
+    EN: valid if the calibrated region shifts slightly.
+    """
+    count = 0
+    for x_center in VIGOUR_ORB_PIP_X_CENTERS:
+        region = {
+            "left": base_left + (x_center - VIGOUR_ORB_PIP_HALF_WIDTH),
+            "top": base_top,
+            "width": VIGOUR_ORB_PIP_HALF_WIDTH * 2,
+            "height": VIGOUR_ORB_PIP_HEIGHT,
+        }
+        frame = capturer.grab(region)
+        if frame.mean() >= VIGOUR_ORB_LIT_BRIGHTNESS_THRESHOLD:
+            count += 1
+        else:
+            # Les pips s'allument dans l'ordre -- un pip éteint signifie que
+            # tous les suivants le sont aussi (cf. vidéo analysée : jamais vu
+            # un pip N allumé avec N-1 éteint). Arrêt anticipé, pas un
+            # balayage complet des 6 à chaque tick.
+            # EN: Pips light up in order -- an unlit pip means every following
+            # EN: one is unlit too (cf. analyzed video: never seen pip N lit
+            # EN: with N-1 unlit). Early exit, not a full sweep of all 6 every
+            # EN: tick.
+            break
+    return count
+
+
+def make_vigour_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher, regions: dict):
+    """
+    Lit les 4 emplacements du cadre de groupe et remplit state.party (cf.
+    CombatState.party, engine.py) -- HP% via barre de remplissage PAR SLOT
+    (cf. VIGOUR_HP_BAR_FILL_BGR), cleanse_needed via template d'icône de
+    debuff. hot_active N'EST PAS encore lu (Phase 1 du plan d'intégration --
+    cf. discussion architecture) : reste à False tant que le template du HoT
+    n'a pas été capturé et cette fonction mise à jour en conséquence.
+
+    Ressources personnelles (mana, orbes) écrites dans state.resources --
+    même dict générique que stormfall/earthfall (Meiko) et fury (Tariq), pas
+    un champ dédié : ce sont des ressources DU JOUEUR, pas du groupe,
+    exactement la même nature d'information que ce que ce dict contient déjà
+    ailleurs dans ce fichier.
+
+    Région absente (regions.get(...) is None) -> lecture sautée (slot marqué
+    absent, ou ressource laissée à sa valeur par défaut), même convention que
+    rage_bar/hammer_storm_cast_bar (Tariq, plus haut) : un profil non calibré
+    ne doit pas faire planter la lecture, seulement produire "rien à voir
+    ici". C'est le cas aujourd'hui de mana_bar (position non localisée avec
+    confiance, cf. VIGOUR_MANA_BAR_FILL_BGR) -- party_*_debuff sont bien
+    présentes dans le profil (cf. docstring plus bas pour leur statut réel :
+    présentes et recalibrées, mais pas encore garanties viser le bon type
+    d'icône).
+
+    party_N_debuff : RECALIBRÉ le 2026-07-16 (2e vidéo analysée). La 1re
+    calibration (offset 91px depuis le bord gauche du cadre, mesurée UNE
+    SEULE FOIS sur party_1 dans la 1re vidéo, puis extrapolée par corrélation
+    aux 3 autres) était imprécise. Cette fois, DEUX mesures indépendantes
+    (Elayra/party_1 ET Kaschy/party_2, icônes différentes mais même
+    emplacement) donnent un offset cohérent de 109-110px -- confirme que
+    l'hypothèse de corrélation (même espacement pour tous les slots) est
+    juste, mais que la mesure de départ ne l'était pas. Régions recalées sur
+    cette moyenne (cf. profiles/Default/config.json).
+
+    CE QUI RESTE NON RÉSOLU, PAS CACHÉ : rien ne confirme que l'icône
+    observée à cet emplacement soit spécifiquement LE debuff dispellable --
+    plusieurs icônes différentes (proc personnel, buff, cooldown ?) ont été
+    vues au même endroit selon les instants dans les 2 vidéos, sans moyen de
+    les distinguer depuis les pixels seuls. cleanse_needed peut donc
+    déclencher sur autre chose qu'un vrai debuff à nettoyer tant que ce
+    point n'est pas tranché en jeu (capture_helper.py mark pendant que TOI
+    tu confirmes visuellement "c'est bien ça, le debuff cleansable").
+
+    EN: Reads the 4 party-frame slots and fills state.party (cf.
+    EN: CombatState.party, engine.py) -- HP% via fill bar PER SLOT (cf.
+    EN: VIGOUR_HP_BAR_FILL_BGR), cleanse_needed via a debuff-icon template.
+    EN: hot_active is NOT read yet (Phase 1 of the integration plan -- cf.
+    EN: architecture discussion): stays False until the HoT template is
+    EN: captured and this function updated accordingly.
+
+    EN: Personal resources (mana, orbs) written into state.resources -- the
+    EN: same generic dict as stormfall/earthfall (Meiko) and fury (Tariq),
+    EN: not a dedicated field: these are the PLAYER's resources, not the
+    EN: group's, exactly the same kind of information this dict already holds
+    EN: elsewhere in this file.
+
+    EN: Missing region (regions.get(...) is None) -> read skipped (slot
+    EN: marked absent, or resource left at its default), same convention as
+    EN: rage_bar/hammer_storm_cast_bar (Tariq, above): an uncalibrated
+    EN: profile shouldn't crash the read, only produce "nothing to see here".
+    EN: That's the case today for mana_bar (position not confidently located,
+    EN: cf. VIGOUR_MANA_BAR_FILL_BGR) -- party_*_debuff ARE present in the
+    EN: profile (cf. docstring below for their real status: present and
+    EN: recalibrated, but not yet guaranteed to target the right icon type).
+
+    EN: party_N_debuff: RECALIBRATED on 2026-07-16 (2nd video analyzed). The
+    EN: 1st calibration (offset 91px from the frame's left edge, measured
+    EN: ONCE on party_1 in the 1st video, then extrapolated by correlation to
+    EN: the other 3) was imprecise. This time, TWO independent measurements
+    EN: (Elayra/party_1 AND Kaschy/party_2, different icons but same
+    EN: location) give a consistent offset of 109-110px -- confirms the
+    EN: correlation assumption (same spacing for every slot) is correct, but
+    EN: the original measurement wasn't. Regions recalibrated on this average
+    EN: (cf. profiles/Default/config.json).
+
+    EN: WHAT REMAINS UNRESOLVED, NOT HIDDEN: nothing confirms the icon
+    EN: observed at this location is specifically THE dispellable debuff --
+    EN: several different icons (personal proc, buff, cooldown?) were seen at
+    EN: the same spot at different moments across both videos, with no way
+    EN: to tell them apart from pixels alone. cleanse_needed could therefore
+    EN: trigger on something other than a real debuff to cleanse until this
+    EN: is settled in-game (capture_helper.py mark while YOU visually confirm
+    EN: "yes, that's the cleansable debuff").
+    """
+
+    def state_update_fn(state: CombatState) -> None:
+        # party_cleanse_debuff.png n'a jamais été capturé (2026-07-16, 1er test
+        # en jeu : FileNotFoundError levée par matcher.is_match, cf. error.log).
+        # TemplateMatcher._load ne met rien en cache sur un échec de lecture,
+        # donc l'exception se reproduirait à CHAQUE tick -- et comme ce bloc
+        # tourne AVANT state.party = party / detection_meta plus bas, elle
+        # avortait toute la fonction : party, mana et orbes ne se mettaient
+        # plus jamais à jour, pas seulement cleanse_needed. Même convention que
+        # les régions non calibrées (hp_region/debuff_region/mana_region plus
+        # bas) : un template pas encore capturé -> "rien à voir ici", pas un
+        # crash. Vérifié une seule fois par tick (pas par slot, le nom du
+        # template est le même pour les 4).
+        #
+        # EN: party_cleanse_debuff.png was never captured (2026-07-16, first
+        # EN: in-game test: FileNotFoundError raised by matcher.is_match, cf.
+        # EN: error.log). TemplateMatcher._load caches nothing on a failed
+        # EN: read, so the exception would repeat on EVERY tick -- and since
+        # EN: this block ran BEFORE state.party = party / detection_meta below,
+        # EN: it aborted the whole function: party, mana and orbs stopped
+        # EN: updating entirely, not just cleanse_needed. Same convention as
+        # EN: uncalibrated regions (hp_region/debuff_region/mana_region below):
+        # EN: a not-yet-captured template -> "nothing to see here", not a
+        # EN: crash. Checked once per tick (not per slot, the template name is
+        # EN: the same for all 4).
+        debuff_template_available = (matcher.template_dir / "party_cleanse_debuff.png").exists()
+
+        party: dict = {}
+        for i in PARTY_SLOTS:
+            hp_region = regions.get(f"party_{i}_hp")
+            if hp_region is None:
+                party[i] = {"present": False, "hp_pct": None, "cleanse_needed": False, "hot_active": False}
+                continue
+
+            frame = capturer.grab(hp_region)
+            hp_pct = _read_party_hp_pct(frame)
+
+            cleanse_needed = False
+            debuff_region = regions.get(f"party_{i}_debuff")
+            if debuff_region is not None and debuff_template_available:
+                debuff_frame = capturer.grab(debuff_region)
+                cleanse_needed = matcher.is_match(debuff_frame, "party_cleanse_debuff")
+
+            party[i] = {"present": True, "hp_pct": hp_pct, "cleanse_needed": cleanse_needed, "hot_active": False}
+
+        state.party = party
+        state.detection_meta["vigour_party_bars"] = DetectionMeta(created_at=time.monotonic())
+
+        mana_region = regions.get("mana_bar")
+        if mana_region is not None:
+            mana_frame = capturer.grab(mana_region)
+            state.resources["mana"] = read_fill_pct(
+                mana_frame, VIGOUR_MANA_BAR_FILL_BGR, tolerance=50, direction="ltr", max_gap=4
+            )
+
+        orb_region = regions.get("orb_bar")
+        if orb_region is not None:
+            state.resources["orbs"] = count_lit_orb_pips(capturer, orb_region["left"], orb_region["top"])
 
     return state_update_fn

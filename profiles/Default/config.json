@@ -55,6 +55,36 @@
         "hammer_storm_stack_badge": {"left": 1182, "top": 1354, "width": 28, "height": 20},
         "hammer_storm_cast_bar": {"left": 1123, "top": 931, "width": 296, "height": 4}
       }
+    },
+    "vigour": {
+      "keybinds": {
+        "dawnflare": "1",
+        "radiant_blast": "2",
+        "greater_heal": "3",
+        "dawnbreaker_orb": "5",
+        "remove_magic": "shift+5",
+        "luminous_barrier": "q",
+        "rune_of_renewal": "shift+3",
+        "soulbrand": "6",
+        "target_player_1": "f1",
+        "target_player_2": "f2",
+        "target_player_3": "f3",
+        "target_player_4": "f4"
+      },
+      "_keybinds_comment": "Touches d'abilities fournies le 2026-07-16 par l'utilisateur ; touches de ciblage (F1-F4, confirmées par l'utilisateur) mappées le même jour -- 'f1'..'f4' vérifiées présentes dans pydirectinput.KEYBOARD_MAPPING avant d'écrire cette config. MANQUANT, à combler avant tout test réel : circle_of_light (aucune touche donnée -- le '4' est notablement absent de la séquence 1/2/3/_/5 des abilities, probablement l'oubli -- à ne pas confondre avec target_player_4 = 'f4', une touche différente).",
+      "regions": {
+        "party_1_hp": {"left": 988, "top": 1048, "width": 137, "height": 14},
+        "party_2_hp": {"left": 1132, "top": 1048, "width": 135, "height": 14},
+        "party_3_hp": {"left": 1274, "top": 1048, "width": 134, "height": 14},
+        "party_4_hp": {"left": 1415, "top": 1048, "width": 138, "height": 14},
+        "party_1_debuff": {"left": 1097, "top": 1013, "width": 44, "height": 35},
+        "party_2_debuff": {"left": 1241, "top": 1013, "width": 44, "height": 35},
+        "party_3_debuff": {"left": 1383, "top": 1013, "width": 44, "height": 35},
+        "party_4_debuff": {"left": 1524, "top": 1013, "width": 44, "height": 35},
+        "orb_bar": {"left": 426, "top": 900, "width": 161, "height": 32},
+        "mana_bar": {"left": 1210, "top": 864, "width": 95, "height": 10}
+      },
+      "_comment": "Régions party_*_hp/orb_bar mesurées le 2026-07-15 sur fellowship 2026-07-15 19-23-21.mp4 (2560x1440). mana_bar trouvée le 2026-07-15 sur la 2e vidéo (fellowship 2026-07-15 22-45-35.mp4, même résolution) : bord GAUCHE et hauteur confirmés (couleur cyan mesurée en pixels réels à x=1210-1303, y=864-874), mais la barre était proche du plein dans tous les instants examinés -- bord DROIT (0% réel) et largeur totale du conteneur PAS confirmés, width=95 est une estimation prudente à revalider dès qu'un moment de mana visiblement partiel est capturé. party_*_debuff RECALIBRÉES le 2026-07-16 : la 1re calibration (offset 91px depuis le bord gauche du cadre, mesurée une seule fois sur party_1 dans la 1re vidéo) était imprécise -- 2 mesures indépendantes sur la 2e vidéo (Elayra/party_1 ET Kaschy/party_2, icône différente mais même emplacement d'icône) donnent un offset cohérent de 109-110px, largeur ~34-43px -- valeurs ci-dessus recalées sur cette moyenne (offset 109px, largeur 44px, top remonté à 1013 pour inclure le haut de l'icône). RESTE NON RÉSOLU (cf. state_update.py) : aucune confirmation que l'icône observée soit spécifiquement LE debuff dispellable (vs un buff/proc/cooldown personnel) -- plusieurs icônes différentes vues à cet emplacement selon les instants, sans moyen de les distinguer depuis les pixels seuls."
     }
   }
 }

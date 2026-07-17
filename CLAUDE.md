@@ -66,10 +66,17 @@ Table des combos :
 
 **Warden of the Temple** : debuff qui stack jusqu'à 3 via Lashing
 Stormkick. Icône affiche un badge "x3" à 3 stacks (visuellement distinct,
-capturable comme template à part : `warden_of_the_temple_3`). À 3 stacks,
-le prochain Spirited Vortex obtient +50% dégâts / +30% dodge — **règle
-métier centrale : à 3 stacks, priorité absolue à Spirited Vortex sur
-Spirited Strikes**, implémentée et testée dans `hooks.py`.
+capturable comme template à part : `warden_of_the_temple_3`, mais **pas**
+utilisé pour compter les stacks, cf. `hooks.py`). À 3 stacks, le combo
+défensif est forcé à coup sûr, quel que soit l'état des buffs — **règle
+métier centrale**, implémentée et testée dans `hooks.py`.
+
+RÈGLE MISE À JOUR (2026-07-16, demande explicite de l'utilisateur) : forcer
+*toujours* Spirited Vortex à 3 stacks n'est plus la règle voulue — la cible
+du forçage **alterne** désormais entre Spirited Vortex et Spirited Strikes
+(une activation sur Vortex, la suivante sur Strikes, etc.), suivie via
+`state.hooks["warden_empower_target"]`, qui démarre sur `"vortex"` à
+chaque combat.
 
 `gcd_ms = 1100` — mesuré empiriquement par l'utilisateur (capture 30fps de la
 barre d'abilities), ne pas changer sans nouvelle mesure.
@@ -249,10 +256,17 @@ Combo table:
 
 **Warden of the Temple**: a debuff that stacks up to 3 via Lashing Stormkick.
 The icon shows an "x3" badge at 3 stacks (visually distinct, capturable as a
-separate template: `warden_of_the_temple_3`). At 3 stacks, the next Spirited
-Vortex gets +50% damage / +30% dodge — **central business rule: at 3 stacks,
-absolute priority to Spirited Vortex over Spirited Strikes**, implemented and
-tested in `hooks.py`.
+separate template: `warden_of_the_temple_3`, but **not** used to count stacks,
+cf. `hooks.py`). At 3 stacks, the defensive combo is forced for sure,
+regardless of buff state — **central business rule**, implemented and tested
+in `hooks.py`.
+
+UPDATED RULE (2026-07-16, the user's explicit request): *always* forcing
+Spirited Vortex at 3 stacks is no longer the wanted rule — the forced target
+now **alternates** between Spirited Vortex and Spirited Strikes (one
+activation on Vortex, the next on Strikes, and so on), tracked via
+`state.hooks["warden_empower_target"]`, which starts on `"vortex"` at the
+beginning of each fight.
 
 `gcd_ms = 1100` — measured empirically by l'utilisateur (30fps capture of the ability
 bar), do not change without a new measurement.

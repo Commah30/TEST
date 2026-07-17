@@ -30,9 +30,11 @@ testé en jeu, le badge est trop petit pour que le template matching
 distingue x2 de x3 de façon fiable (le bot restait bloqué à forcer Vortex
 dès 2 stacks). Le nombre de stacks est à la place compté ici, dans le code :
 la mécanique est entièrement déterministe (seuls Lashing Stormkick et
-Earthfist Barrage posent un stack, seul un Vortex casté À 3 stacks le
-consomme -- rien d'autre ne peut le faire varier), donc pas besoin de lire
-un pixel pour le savoir.
+Earthfist Barrage posent un stack, seul le combo défensif forcé À 3 stacks
+le consomme -- rien d'autre ne peut le faire varier), donc pas besoin de
+lire un pixel pour le savoir. Depuis le 2026-07-16, ce forçage alterne entre
+Vortex et Strikes (cf. warden_empower_target plus bas) mais reste l'unique
+consommateur des 3 stacks, quelle que soit la cible du moment.
 
 Un premier filet de sécurité "rattrape le compteur vers le haut si le badge
 x3 est détecté visuellement" a été essayé, puis RETIRÉ : testé en jeu,
@@ -79,8 +81,11 @@ EN: tested in-game, the badge is too small for template matching to reliably
 EN: tell x2 from x3 (the bot stayed stuck forcing Vortex from 2 stacks).
 EN: Instead the stack count is tracked here, in code: the mechanic is fully
 EN: deterministic (only Lashing Stormkick and Earthfist Barrage add a stack,
-EN: only a Vortex cast AT 3 stacks consumes it -- nothing else can change it),
-EN: so no need to read a pixel to know it.
+EN: only the forced defensive combo AT 3 stacks consumes it -- nothing else
+EN: can change it), so no need to read a pixel to know it. Since 2026-07-16,
+EN: this forced cast alternates between Vortex and Strikes (cf.
+EN: warden_empower_target below) but remains the sole consumer of the 3
+EN: stacks, whichever target is current.
 EN:
 EN: A first safety net "bump the counter up if the x3 badge is detected
 EN: visually" was tried, then REMOVED: tested in-game,
@@ -101,6 +106,8 @@ import time
 from typing import Optional
 
 from .engine import CombatState, Intent
+from .freshness import Freshness
+from .state_update import VIGOUR_PARTY_FRESHNESS_POLICY
 from wardenbot.diagnostics import log_press_confirmation
 
 FINISHER_DELAY_S = 0.15   # laisse au jeu le temps d'enregistrer la 2e pièce · EN: gives the game time to register the 2nd piece
@@ -337,6 +344,22 @@ def _meiko_choose_combo_step(state: CombatState) -> Optional[str]:
             _set_warden_stacks(state, now, state.hooks.get("warden_stacks", 0) + 1)
         elif combo == "reset":
             _set_warden_stacks(state, now, 0)
+            # Bascule warden_empower_target UNIQUEMENT ici, à la confirmation
+            # réelle du cast -- jamais au moment de la décision plus bas. Même
+            # principe que grant/reset ci-dessus : si ce tick n'est qu'un
+            # "aperçu" jamais réellement pressé (appel de test isolé, ou en
+            # prod un hook affaibli par weight_overrides qui perd face au scan
+            # -- cf. RotationEngine.tick), l'alternance ne doit PAS avancer,
+            # sinon elle dérive sans qu'aucun cast n'ait eu lieu.
+            # EN: Only flip warden_empower_target HERE, at the real confirmation
+            # EN: of the cast -- never at decision time below. Same principle as
+            # EN: grant/reset above: if this tick is only a "preview" that never
+            # EN: actually got pressed (an isolated test call, or in prod a hook
+            # EN: weakened by weight_overrides that loses to the scan -- cf.
+            # EN: RotationEngine.tick), the alternation must NOT advance, or it
+            # EN: drifts without any cast having happened.
+            used_target = state.hooks.pop("_pending_warden_empower_flip", "vortex")
+            state.hooks["warden_empower_target"] = "strikes" if used_target == "vortex" else "vortex"
         return "fighting_techniques"
 
     # --- Tout ce qui suit presse une VRAIE touche soumise au GCD -- on
@@ -374,33 +397,60 @@ def _meiko_choose_combo_step(state: CombatState) -> Optional[str]:
         strikes_up = state.buffs.get("spirited_strikes", False)
 
         if state.hooks.get("warden_stacks", 0) >= WARDEN_STACKS_TO_EMPOWER:
-            # 3 stacks confirmés -> Spirited Vortex à coup sûr, peu importe
-            # l'état de Strikes. C'est la règle que tu voulais imposer. Ce
-            # cast-là (et LUI SEUL) consomme les 3 stacks.
-            # EN: 3 stacks confirmed -> Spirited Vortex for sure, regardless of
-            # EN: the Strikes state. This is the rule you wanted to enforce.
-            # EN: That cast (and IT ALONE) consumes the 3 stacks.
+            # 3 stacks confirmés -> combo défensif forcé à coup sûr, peu
+            # importe l'état des buffs. Ce cast-là (et LUI SEUL) consomme les
+            # 3 stacks.
             #
+            # CHANGEMENT DE RÈGLE (2026-07-16, demande explicite de l'utilisateur) :
+            # forcer TOUJOURS Spirited Vortex à 3 stacks n'est plus la règle
+            # voulue -- on ALTERNE désormais la cible du forçage : 3 stacks ->
+            # Vortex, les 3 stacks suivants -> Spirited Strikes, les 3
+            # suivants -> Vortex, etc. warden_empower_target (state.hooks)
+            # retient la cible du PROCHAIN forçage et bascule à chaque fois
+            # que les 3 stacks sont consommées ici. Démarre sur "vortex" (1re
+            # activation du combat = comportement d'origine).
+            # EN: RULE CHANGE (2026-07-16, the user's explicit request): ALWAYS
+            # EN: forcing Spirited Vortex at 3 stacks is no longer the wanted
+            # EN: rule -- we now ALTERNATE the forced target: 3 stacks ->
+            # EN: Vortex, next 3 stacks -> Spirited Strikes, next 3 stacks ->
+            # EN: Vortex, etc. warden_empower_target (state.hooks) remembers
+            # EN: the target of the NEXT forced cast and flips every time the
+            # EN: 3 stacks are consumed here. Starts on "vortex" (the fight's
+            # EN: 1st activation = original behavior).
+            # Lecture SEULE ici -- le flip réel n'a lieu qu'à la confirmation
+            # du cast (cf. bloc "2e pièce déjà pressée" plus haut), jamais à
+            # la décision. On note juste la cible choisie CE tick dans
+            # _pending_warden_empower_flip pour que la confirmation sache
+            # quoi inverser le moment venu.
+            # EN: READ ONLY here -- the real flip only happens at cast
+            # EN: confirmation (cf. the "2nd piece already pressed" block
+            # EN: above), never at decision time. Just note THIS tick's chosen
+            # EN: target in _pending_warden_empower_flip so confirmation knows
+            # EN: what to invert once it lands.
+            target = state.hooks.get("warden_empower_target", "vortex")
+            state.hooks["_pending_warden_empower_flip"] = target
+
             # BUG TROUVÉ EN JEU (2026-07-16, rapporté par l'utilisateur) : "la
             # rotation spam Vortex/Strikes" -- après CE cast forcé, on
             # dé-prime volontairement (meiko_defense_primed=False) pour
-            # laisser "rien en cours" re-vérifier UNE fois Strikes (souvent
-            # retombé pendant les 3 cycles Storm/Earth) avant de retourner à
-            # la boucle -- exactement la séquence que l'utilisateur a décrite
-            # (Vortex forcé PUIS refresh Strikes PUIS repart sur la
-            # rotation). cf. meiko_defense_primed plus bas pour le
-            # mécanisme complet.
+            # laisser "rien en cours" re-vérifier UNE fois l'AUTRE buff (celui
+            # qui n'a PAS reçu ce forçage-ci, souvent retombé pendant les 3
+            # cycles Storm/Earth) avant de retourner à la boucle. Marche
+            # symétriquement pour les deux cibles : la logique "rien en
+            # cours" qui suit vérifie vortex_up ET strikes_up indépendamment.
+            # cf. meiko_defense_primed plus bas pour le mécanisme complet.
             # EN: BUG FOUND IN-GAME (2026-07-16, reported by the user): "the
             # EN: rotation spams Vortex/Strikes" -- after THIS forced cast, we
             # EN: deliberately un-prime (meiko_defense_primed=False) so "rien
-            # EN: en cours" re-checks Strikes once (often dropped during the 3
-            # EN: Storm/Earth cycles) before returning to the loop -- exactly
-            # EN: the sequence the user described (forced Vortex THEN Strikes
-            # EN: refresh THEN back to rotation). cf. meiko_defense_primed
-            # EN: below for the full mechanism.
+            # EN: en cours" re-checks the OTHER buff once (the one that did NOT
+            # EN: receive this forced cast, often dropped during the 3
+            # EN: Storm/Earth cycles) before returning to the loop. Works
+            # EN: symmetrically for either target: the "rien en cours" logic
+            # EN: that follows checks vortex_up AND strikes_up independently.
+            # EN: cf. meiko_defense_primed below for the full mechanism.
             state.hooks["_pending_stack_combo"] = "reset"
             state.hooks["meiko_defense_primed"] = False
-            return "earth_fist_2"
+            return "earth_fist_2" if target == "vortex" else "wind_kick_2"
 
         if state.hooks.get("meiko_defense_primed", False):
             # DEMANDE DE L'UTILISATEUR (2026-07-16) : une fois primé, Vortex ne doit
@@ -477,8 +527,10 @@ def _meiko_choose_combo_step(state: CombatState) -> Optional[str]:
     # observé. Séquence attendue par l'utilisateur : ouvrir Vortex puis Strikes une
     # FOIS en début de combat, PUIS laisser la boucle Storm/Earth tourner
     # sans interruption jusqu'à 3 stacks (même si Vortex/Strikes retombent
-    # entre-temps), forcer Vortex à 3 stacks, refresh Strikes si besoin à CE
-    # moment précis, puis reprendre la boucle -- cycle qui se répète.
+    # entre-temps), forcer le combo à 3 stacks (Vortex ou Strikes en
+    # alternance, cf. warden_empower_target plus haut), refresh l'autre buff
+    # si besoin à CE moment précis, puis reprendre la boucle -- cycle qui se
+    # répète.
     #
     # meiko_defense_primed (flag) : True une fois que les deux buffs ont été
     # confirmés up au moins une fois -- tant qu'il est True, une chute
@@ -486,10 +538,11 @@ def _meiko_choose_combo_step(state: CombatState) -> Optional[str]:
     # PLUS rien (on laisse `return None` -> le scan de priorité normal
     # reprend earth_fist, l'ouvreur ST). Remis à False à deux moments
     # seulement : (1) au tout début du combat (valeur par défaut), pour
-    # forcer le double-refresh initial ; (2) juste après le Vortex forcé à 3
-    # stacks (cf. plus haut), pour laisser UNE relecture de Strikes avant de
-    # re-primer et replonger dans la boucle. warden_stacks>=3 reste un
-    # déclencheur ABSOLU, primed ou non -- jamais retardé.
+    # forcer le double-refresh initial ; (2) juste après le cast forcé à 3
+    # stacks (cf. plus haut -- Vortex OU Strikes selon l'alternance), pour
+    # laisser UNE relecture de l'AUTRE buff avant de re-primer et replonger
+    # dans la boucle. warden_stacks>=3 reste un déclencheur ABSOLU, primed ou
+    # non -- jamais retardé.
     # EN: --- Nothing in progress: should we OPEN the defensive combo now? ---
     # EN: BUG FOUND IN-GAME (2026-07-16, reported by the user): "the rotation
     # EN: just spams the Spirited Vortex/Strikes combo" -- before this fix,
@@ -501,9 +554,10 @@ def _meiko_choose_combo_step(state: CombatState) -> Optional[str]:
     # EN: cycle -- exactly the observed spam. Sequence the user expects: open
     # EN: Vortex then Strikes ONCE at the start of the fight, THEN let the
     # EN: Storm/Earth loop run uninterrupted until 3 stacks (even if
-    # EN: Vortex/Strikes drop in between), force Vortex at 3 stacks, refresh
-    # EN: Strikes if needed at THAT exact moment, then resume the loop --
-    # EN: cycle repeats.
+    # EN: Vortex/Strikes drop in between), force the combo at 3 stacks
+    # EN: (Vortex or Strikes alternating, cf. warden_empower_target above),
+    # EN: refresh the other buff if needed at THAT exact moment, then resume
+    # EN: the loop -- cycle repeats.
     # EN:
     # EN: meiko_defense_primed (flag): True once both buffs have been
     # EN: confirmed up at least once -- while True, a one-off drop of
@@ -511,10 +565,11 @@ def _meiko_choose_combo_step(state: CombatState) -> Optional[str]:
     # EN: (we `return None` -> the normal priority scan resumes earth_fist,
     # EN: the ST opener). Reset to False at only two moments: (1) the very
     # EN: start of the fight (default value), to force the initial double
-    # EN: refresh; (2) right after the forced Vortex at 3 stacks (cf. above),
-    # EN: to allow ONE re-check of Strikes before re-priming and diving back
-    # EN: into the loop. warden_stacks>=3 stays an ABSOLUTE trigger, primed or
-    # EN: not -- never delayed.
+    # EN: refresh; (2) right after the forced cast at 3 stacks (cf. above --
+    # EN: Vortex OR Strikes depending on the alternation), to allow ONE
+    # EN: re-check of the OTHER buff before re-priming and diving back into
+    # EN: the loop. warden_stacks>=3 stays an ABSOLUTE trigger, primed or not
+    # EN: -- never delayed.
     vortex_up = state.buffs.get("spirited_vortex", False)
     strikes_up = state.buffs.get("spirited_strikes", False)
     stacks_maxed = state.hooks.get("warden_stacks", 0) >= WARDEN_STACKS_TO_EMPOWER
@@ -1284,3 +1339,511 @@ def tariq_post_tick(state: CombatState, pressed: str) -> None:
         state.hooks["_hammer_storm_proc_pending_since"] = time.monotonic()
     elif pressed in TARIQ_PROC_BUFFS:
         state.hooks[f"{pressed}_ready"] = False
+
+
+# =============================================================================
+# VIGOUR (Healer) -- Phase 1 de l'industrialisation Vigour (2026-07-15, cf.
+# discussion architecture). Matrice de poids simple, un seul soin proposé par
+# tick (comme meiko_pre_tick/tariq_pre_tick, un seul cast possible par GCD de
+# toute façon) : dégâts de groupe > allié critique > cleanse > entretien
+# (HoT). AoE heal ne renseigne jamais Intent.target -- soin de zone, pas de
+# ciblage à faire (cf. RotationEngine.tick(), le press de ciblage ne se
+# déclenche que si target est renseigné).
+#
+# PREMIER VRAI BRANCHEMENT DE freshness.py DANS UNE DÉCISION (cf. l'audit :
+# jusqu'ici mesuré/classifiable mais jamais consulté, cf. engine.py::
+# CombatState.detection_meta). Une lecture EXPIRED -> on ne propose RIEN
+# plutôt que d'agir sur une valeur qu'on ne peut plus garantir fraîche ; le
+# scan de priorité YAML (poids 50) reste libre de prendre le relai si
+# quelqu'un lui en donne l'occasion (aujourd'hui : rien, cf. config/vigour.yaml,
+# Phase 1 -- toutes les abilities sont skip_detection, décidées ici).
+# EN: VIGOUR (Healer) -- Phase 1 of the Vigour industrialization (2026-07-15,
+# EN: cf. architecture discussion). Simple weight matrix, one heal proposed
+# EN: per tick (like meiko_pre_tick/tariq_pre_tick, only one cast possible per
+# EN: GCD anyway): group damage > critical ally > cleanse > upkeep (HoT). AoE
+# EN: heal never sets Intent.target -- area heal, no targeting needed (cf.
+# EN: RotationEngine.tick(), the target-select press only fires if target is
+# EN: set).
+# EN:
+# EN: FIRST REAL WIRING OF freshness.py INTO A DECISION (cf. the audit: until
+# EN: now only measured/classifiable but never consulted, cf. engine.py::
+# EN: CombatState.detection_meta). An EXPIRED reading -> propose NOTHING
+# EN: rather than act on a value we can no longer guarantee is fresh; the YAML
+# EN: priority scan (weight 50) stays free to take over if anything gives it
+# EN: the chance to (today: nothing, cf. config/vigour.yaml, Phase 1 -- every
+# EN: ability is skip_detection, decided here).
+VIGOUR_CRITICAL_HP_THRESHOLD = 0.30
+VIGOUR_HURT_HP_THRESHOLD = 0.70
+VIGOUR_GROUP_DAMAGE_MIN_HURT_ALLIES = 3
+VIGOUR_FULL_HP_THRESHOLD = 0.97   # "personne n'a pris le moindre degat" -- pas 1.0 strict : tolere le bruit de mesure du bar_reader (+/-3pt deja documente) sans faire flapper build<->dps pour rien
+
+# ROTATION RÉELLE (2026-07-16, build Legendary Cloak -- cf. method.gg,
+# section talents + playstyle-and-rotation post-4e-ligne, complétée par les
+# cooldowns/coûts fournis directement par l'utilisateur). RÉVISÉE le
+# 2026-07-16 (2e passe, 1er retour de test en jeu) : la 1re version faisait
+# de l'entretien de Rune Of Renewal un timer par allié (~25s, "100% uptime"
+# pris au pied de la lettre) et gardait Dawnbreaker Orb/Luminous Barrier sur
+# un seuil "quelqu'un profiterait d'un complément" (<90%, quasi toujours
+# vrai en combat) -- deux sources de dépense d'orbe DÉCONNECTÉES du vrai
+# besoin de soin, exactement le symptôme signalé par l'utilisateur ("on ne
+# peut pas se permettre de spam des runes pour rien avec renewal ni avec les
+# boucliers"). Remplacée par une règle strictement pilotée par la vie réelle
+# du groupe (build seulement si personne n'a besoin de rien, dépense
+# seulement si quelqu'un en a réellement besoin) :
+#
+# Ordre de priorité, du plus urgent au moins urgent :
+#   1. Critique (<30%)          -> Greater Heal (soin direct)
+#   2. Urgence de groupe (3+)   -> Circle of Light (AoE, cf. HYPOTHÈSE
+#      CIBLAGE ci-dessous)
+#   3. Cleanse                  -> Remove Magic
+#   4. Quelqu'un à 70% ou moins -> soigne le plus bas en vie : Dawnbreaker
+#      Orb (2 orbes, le plus gros complément) si affordable et pas en
+#      cooldown, sinon Rune Of Renewal (1 orbe), sinon Dawnflare (aucun orbe
+#      dispo -- on en génère un avant de pouvoir soigner)
+#   5. Personne à 70% ou moins, mais pas TOUT LE MONDE à (quasi) 100% ->
+#      Soulbrand (dégât pur -- une simple égratignure ne justifie pas de
+#      dépenser un orbe de soin)
+#   6. Tout le monde à (quasi) 100% -> Dawnflare (build -- rien à soigner,
+#      autant générer des orbes et taper au passage)
+#
+# Luminous Barrier N'EST PLUS auto-déclenché : sous ce nouveau modèle, son
+# seul déclencheur défendable (quelqu'un <= 70%) est déjà entièrement pris
+# en charge par (4), en mieux -- Dawnbreaker Orb soigne davantage et Rune Of
+# Renewal coûte le même orbe tout en ajoutant l'écho +35%. Garder une
+# branche Luminous Barrier au même seuil serait du code mort (jamais
+# atteint, cf. CLAUDE.md -- pas de demi-implémentation). Reste déclarée dans
+# config/vigour.yaml et câblée côté touche (profiles/Default/config.json)
+# pour un usage manuel, ou pour une future passe si un déclencheur PRÉDICTIF
+# (dégâts entrants, pas seulement la vie actuelle) devient possible.
+#
+# Rune Of Renewal n'a plus de suivi temporel : VIGOUR_RUNE_OF_RENEWAL_
+# DURATION_S/_REFRESH_WINDOW_S, _propose_rune_of_renewal et le bookkeeping
+# de vigour_post_tick ont été retirés plutôt que réajustés -- c'était
+# précisément ce timer (rafraîchir même sans besoin réel) qui causait le
+# spam signalé. vigour_post_tick est redevenu un no-op (cf. plus bas).
+#
+# Dawnbreaker Orb vérifie désormais son propre cooldown (state.is_on_
+# cooldown) AVANT d'être proposé : contrairement au scan de priorité YAML
+# (_pick_ability), un hook_intent n'est PAS filtré par cooldown_until côté
+# moteur (cf. RotationEngine.tick()) -- lui presser cette touche pendant son
+# cooldown de 9.97s brûlerait un GCD entier pour rien pile au moment où
+# quelqu'un a besoin d'un soin. Comme (4) s'appuie beaucoup plus souvent sur
+# Dawnbreaker Orb qu'avant (1er choix pour QUICONQUE est <= 70%, plus une
+# niche isolée), cette vérification devient nécessaire ici -- Circle of
+# Light/Remove Magic/Luminous Barrier ont la même lacune (jamais vérifiée),
+# préexistante et non traitée ici (hors périmètre de ce correctif, cf.
+# discussion 2026-07-16).
+#
+# HYPOTHÈSE CIBLAGE Circle of Light (PAS VÉRIFIÉE EN JEU) : ce sort cible
+# normalement le SOL sous les pieds d'un joueur, pas une unité -- ce moteur
+# ne pilote que le clavier (pydirectinput), aucun contrôle du curseur/de la
+# caméra pour un ciblage au sol. On utilise le MÊME mécanisme de ciblage
+# d'allié que les autres sorts (Intent.target -> RotationEngine.tick() presse
+# la touche de ciblage avant le sort, cf. engine.py) en visant le tank comme
+# point d'ancrage (le groupe se regroupe généralement sur lui). Ça ne
+# fonctionnera QUE si Fellowship a une option "cast au sol sous la cible"
+# (fréquente dans ce genre de jeu, mais PAS confirmée ici) -- à valider en
+# jeu avant de faire confiance à ce sort spécifiquement.
+# EN: REAL ROTATION (2026-07-16, Legendary Cloak build -- cf. method.gg,
+# EN: talents + post-4th-row playstyle-and-rotation section, completed with
+# EN: cooldowns/costs given directly by the user). REVISED on 2026-07-16
+# EN: (2nd pass, 1st in-game test feedback): the 1st version turned Rune Of
+# EN: Renewal upkeep into a per-ally timer (~25s, "100% uptime" taken
+# EN: literally) and kept Dawnbreaker Orb/Luminous Barrier on a "someone
+# EN: would benefit from a top-up" threshold (<90%, almost always true in
+# EN: combat) -- two orb-spend sources DISCONNECTED from real healing need,
+# EN: exactly the symptom the user reported in-game ("we can't afford to
+# EN: spam runes for nothing with Renewal nor with the shields"). Replaced
+# EN: by a rule strictly driven by the group's real HP (build only if
+# EN: nobody needs anything, spend only if someone genuinely does):
+# EN:
+# EN: Priority order, most to least urgent:
+# EN:   1. Critical (<30%)          -> Greater Heal (direct heal)
+# EN:   2. Group emergency (3+)     -> Circle of Light (AoE, cf. TARGETING
+# EN:      HYPOTHESIS below)
+# EN:   3. Cleanse                  -> Remove Magic
+# EN:   4. Someone at 70% or below  -> heals the lowest-HP one: Dawnbreaker
+# EN:      Orb (2 orbs, the bigger top-up) if affordable and off cooldown,
+# EN:      else Rune Of Renewal (1 orb), else Dawnflare (no orb available --
+# EN:      generate one before we can heal)
+# EN:   5. Nobody at 70% or below, but NOT EVERYONE at (near) 100% ->
+# EN:      Soulbrand (pure damage -- a minor scratch doesn't justify
+# EN:      spending a healing orb)
+# EN:   6. Everyone at (near) 100%  -> Dawnflare (build -- nothing to heal,
+# EN:      might as well generate orbs and hit something along the way)
+# EN:
+# EN: Luminous Barrier is NO LONGER auto-triggered: under this new model,
+# EN: its only defensible trigger (someone <= 70%) is already fully covered
+# EN: by (4), and better -- Dawnbreaker Orb heals for more and Rune Of
+# EN: Renewal costs the same orb while also adding the +35% echo. Keeping a
+# EN: Luminous Barrier branch at the same threshold would be dead code
+# EN: (never reached, cf. CLAUDE.md -- no half-finished implementations).
+# EN: It stays declared in config/vigour.yaml and wired to a key
+# EN: (profiles/Default/config.json) for manual use, or for a future pass if
+# EN: a PREDICTIVE trigger (incoming damage, not just current HP) becomes
+# EN: possible.
+# EN:
+# EN: Rune Of Renewal no longer has timer tracking: VIGOUR_RUNE_OF_RENEWAL_
+# EN: DURATION_S/_REFRESH_WINDOW_S, _propose_rune_of_renewal and vigour_post_
+# EN: tick's bookkeeping were removed rather than re-tuned -- that exact
+# EN: timer (refreshing even without real need) was causing the reported
+# EN: spam. vigour_post_tick is back to being a no-op (cf. below).
+# EN:
+# EN: Dawnbreaker Orb now checks its own cooldown (state.is_on_cooldown)
+# EN: BEFORE being proposed: unlike the YAML priority scan (_pick_ability), a
+# EN: hook_intent is NOT filtered by cooldown_until on the engine side (cf.
+# EN: RotationEngine.tick()) -- pressing this key during its 9.97s cooldown
+# EN: would burn an entire GCD for nothing right when someone needs healing.
+# EN: Since (4) now relies on Dawnbreaker Orb far more often than before
+# EN: (1st choice for ANYONE <= 70%, not an isolated niche anymore), this
+# EN: check becomes necessary here -- Circle of Light/Remove Magic/Luminous
+# EN: Barrier share the same gap (never checked), pre-existing and not
+# EN: addressed here (out of scope for this fix, cf. 2026-07-16 discussion).
+# EN:
+# EN: Circle of Light TARGETING HYPOTHESIS (NOT VERIFIED IN-GAME): this spell
+# EN: normally targets the GROUND at a player's feet, not a unit -- this
+# EN: engine only drives the keyboard (pydirectinput), no cursor/camera
+# EN: control for ground-targeting. Uses the SAME ally-targeting mechanism as
+# EN: other spells (Intent.target -> RotationEngine.tick() presses the
+# EN: target-select key before the spell, cf. engine.py), aiming at the tank
+# EN: as an anchor point (the group usually stacks on him). This will ONLY
+# EN: work if Fellowship has a "cast on the ground at your target" option
+# EN: (common in this genre, but NOT confirmed here) -- to validate in-game
+# EN: before trusting this spell specifically.
+# EN:
+VIGOUR_TANK_SLOT = 1
+VIGOUR_RUNE_OF_RENEWAL_ORB_COST = 1
+VIGOUR_DAWNBREAKER_ORB_COST = 2
+VIGOUR_SOULBRAND_ORB_COST = 1
+
+
+def vigour_pre_tick(state: CombatState) -> list[Intent]:
+    """Câblé comme pre_tick_hook (cf. RotationEngine, engine.py::Intent) --
+    même contrat que meiko_pre_tick/tariq_pre_tick : retourne une liste
+    d'Intent, poids 90, ou [] si rien à proposer (le scan de priorité YAML
+    prend alors le relai)."""
+    now = time.monotonic()
+    if now < state.gcd_until:
+        return []   # même gate GCD explicite que meiko_pre_tick -- cf. CLAUDE.md bug #1 (spam avant la fin du GCD)
+
+    meta = state.detection_meta.get("vigour_party_bars")
+    if meta is None or VIGOUR_PARTY_FRESHNESS_POLICY.classify(meta.age_ms(now=now)) == Freshness.EXPIRED:
+        return []   # donnée trop vieille ou jamais lue -- ne rien affirmer sur la vie du groupe
+
+    party = state.party
+    alive = {i: p for i, p in party.items() if p.get("present")}
+    orbs = state.resources.get("orbs", 0)
+
+    # 1. Critique (<30%) -- Greater Heal
+    critical = {
+        i: p for i, p in alive.items()
+        if p.get("hp_pct") is not None and p["hp_pct"] < VIGOUR_CRITICAL_HP_THRESHOLD
+    }
+    if critical:
+        worst = min(critical, key=lambda i: critical[i]["hp_pct"])
+        return [Intent(ability="greater_heal", target=f"player_{worst}", weight=90, source="vigour_pre_tick")]
+
+    # 2. Urgence de groupe (3+ sous 70%) -- Circle of Light, ciblé sur le tank
+    group_hurt = sum(
+        1 for p in alive.values()
+        if p.get("hp_pct") is not None and p["hp_pct"] < VIGOUR_HURT_HP_THRESHOLD
+    )
+    if group_hurt >= VIGOUR_GROUP_DAMAGE_MIN_HURT_ALLIES and VIGOUR_TANK_SLOT in alive:
+        return [Intent(ability="circle_of_light", target=f"player_{VIGOUR_TANK_SLOT}", weight=90, source="vigour_pre_tick")]
+
+    # 3. Cleanse -- Remove Magic (renommé depuis "Dispell", cf. config/vigour.yaml)
+    cleanse_target = next((i for i, p in alive.items() if p.get("cleanse_needed")), None)
+    if cleanse_target is not None:
+        return [Intent(ability="remove_magic", target=f"player_{cleanse_target}", weight=90, source="vigour_pre_tick")]
+
+    # 4. Quelqu'un à 70% ou moins -- soigne le plus bas en vie. Dawnbreaker
+    # Orb (2 orbes, complément le plus gros) en 1er choix si affordable ET
+    # pas en cooldown (cf. commentaire de tête -- hook_intent non filtré par
+    # cooldown_until côté moteur, contrairement au scan YAML), sinon Rune Of
+    # Renewal (1 orbe), sinon Dawnflare pour d'abord générer l'orbe qui
+    # manque. Remplace l'ancienne priorité "tank spécifiquement" + l'ancien
+    # entretien par timer (2026-07-16, retirés -- cf. commentaire de tête).
+    hurt = {
+        i: p for i, p in alive.items()
+        if p.get("hp_pct") is not None and p["hp_pct"] <= VIGOUR_HURT_HP_THRESHOLD
+    }
+    if hurt:
+        worst = min(hurt, key=lambda i: hurt[i]["hp_pct"])
+        if orbs >= VIGOUR_DAWNBREAKER_ORB_COST and not state.is_on_cooldown("dawnbreaker_orb", now):
+            return [Intent(ability="dawnbreaker_orb", target=f"player_{worst}", weight=90, source="vigour_pre_tick")]
+        if orbs >= VIGOUR_RUNE_OF_RENEWAL_ORB_COST:
+            return [Intent(ability="rune_of_renewal", target=f"player_{worst}", weight=90, source="vigour_pre_tick")]
+        return [Intent(ability="dawnflare", weight=90, source="vigour_pre_tick")]
+
+    # 5/6. Personne à 70% ou moins -- construit (Dawnflare) si tout le monde
+    # est déjà (quasi) au maximum, dépense du dégât pur (Soulbrand) sinon :
+    # une simple égratignure ne justifie pas de dépenser un orbe de soin
+    # (2026-07-16, retour de test en jeu de l'utilisateur -- "si toutes les
+    # vies a 100% il faut build avec dawnflare ... sinon on dps"). Soulbrand
+    # retombe sur Dawnflare si 0 orbe (rien à dépenser -- on en génère un).
+    all_topped = bool(alive) and all(
+        p.get("hp_pct") is not None and p["hp_pct"] >= VIGOUR_FULL_HP_THRESHOLD
+        for p in alive.values()
+    )
+    if not all_topped and orbs >= VIGOUR_SOULBRAND_ORB_COST:
+        return [Intent(ability="soulbrand", weight=90, source="vigour_pre_tick")]
+    return [Intent(ability="dawnflare", weight=90, source="vigour_pre_tick")]
+
+
+def vigour_post_tick(state: CombatState, pressed: str) -> None:
+    """Plus de bookkeeping de timer à faire ici (2026-07-16, cf. commentaire
+    de tête sur vigour_pre_tick -- l'entretien par timer de Rune Of Renewal a
+    été retiré, pas réajusté, car c'était lui qui causait le spam signalé par
+    l'utilisateur). Tout ce dont vigour_pre_tick a besoin (HP/cleanse/orbes)
+    vient de la détection écran à chaque tick, pas d'une estimation. Gardé
+    comme point d'extension, même convention que meiko_post_tick plus haut.
+
+    EN: No more timer bookkeeping to do here (2026-07-16, cf. vigour_pre_
+    EN: tick's header comment -- Rune Of Renewal's timer-based upkeep was
+    EN: removed, not re-tuned, since it was the exact thing causing the spam
+    EN: the user reported). Everything vigour_pre_tick needs (HP/cleanse/
+    EN: orbs) comes from screen detection every tick, not an estimate. Kept
+    EN: as an extension point, same convention as meiko_post_tick above.
+    """
+    return
+
+
+# =============================================================================
+# VIGOUR -- ROTATION EARLY GAME (avant le palier 4 des talents), 2026-07-16.
+# Fournie par l'utilisateur comme une liste de priorités DISTINCTE de la
+# rotation Legendary Cloak ci-dessus (post-4e-ligne, cf. vigour_pre_tick) --
+# PAS un remplacement : les deux coexistent. C'est précisément pourquoi
+# Radiant Blast était déjà déclarée dans config/vigour.yaml mais jamais
+# câblée (cf. le commentaire d'origine : "listée dans le guide UNIQUEMENT
+# pour la rotation PRÉ-4e-ligne") -- cette fonction la câble enfin.
+#
+# Sélection : STATIQUE, dans game_config.py::CHARACTERS["vigour"] --
+# événement one-shot dans la vie d'un personnage (on ne redescend jamais
+# sous le palier 4 une fois qu'on l'a atteint), donc un simple choix de
+# fonction au démarrage suffit, pas besoin d'un flag ou d'une touche de
+# bascule en jeu. game_config.py pointe actuellement sur
+# vigour_pre_tick_early_game/vigour_post_tick_early_game (2026-07-16, "en
+# jeu maintenant" implicite au moment où l'utilisateur a fourni cette liste)
+# -- à repasser sur vigour_pre_tick/vigour_post_tick une fois le palier 4 des
+# talents (build Legendary Cloak) atteint.
+#
+# Ordre de priorité fourni par l'utilisateur (2026-07-16) :
+#   1. Uptime du buff (priorité absolue) -- Rune Of Renewal sur le TANK dès
+#      qu'absent ou sur le point de s'estomper (alimente la génération
+#      passive d'orbe)
+#   2. Urgence tank -- Greater Heal si tank < 70%, étendu au reste du groupe
+#      seulement si la situation dégénère
+#   3. Génération de runes -- Dawnbreaker Orb puis Radiant Blast, dès que
+#      hors cooldown
+#   4. Dépense des runes (règle du cap) -- jauge >= 5 : Luminous Barrier
+#      (allié qui encaisse des dégâts) ou Soulbrand (ennemi)
+#   5. Soin de groupe (AoE) -- Circle of Light si plusieurs alliés perdent
+#      de la vie simultanément
+#   6. Filler -- Dawnflare en boucle
+#
+# 2 AJOUTS NON DEMANDÉS EXPLICITEMENT, documentés pour pouvoir être corrigés :
+#   - Item 0 (Critique <30%, N'IMPORTE QUEL allié) placé AU-DESSUS de (1) :
+#     l'utilisateur ne l'a pas redemandé ici, mais un allié en train de
+#     mourir doit passer avant l'entretien d'un buff, cf. le même seuil déjà
+#     utilisé par vigour_pre_tick (VIGOUR_CRITICAL_HP_THRESHOLD). Couvre
+#     directement la clause "étendu au reste du groupe si la situation
+#     dégénère" de (2) -- pas besoin d'un chiffre inventé séparé.
+#   - Cleanse (Remove Magic) inséré juste après, par continuité avec
+#     vigour_pre_tick -- absent de la liste fournie, mais un debuff qui
+#     traîne ne se résout pas tout seul.
+#
+# Radiant Blast (2026-07-16, confirmé par l'utilisateur) : coûte du MANA,
+# PAS d'orbe -- risque de vidage de mana identique à Greater Heal si spammé
+# sans limite (cf. "erreurs communes" de l'utilisateur). Gatée par
+# VIGOUR_EARLY_GAME_RADIANT_BLAST_MANA_FLOOR, un seuil DE NOTRE PROPRE CHOIX
+# (pas fourni par l'utilisateur) -- à ajuster si trop/pas assez conservateur
+# en jeu.
+#
+# Rune Of Renewal : timer réintroduit, mais scopé UNIQUEMENT AU TANK (une
+# seule cible, un seul horodatage) -- PAS une resucée du timer "toutes les
+# 25s sur les 4 alliés" retiré plus haut (cause du spam signalé) : ici c'est
+# le guide LUI-MÊME qui demande explicitement cette uptime précise, sur un
+# rôle précis, pour une raison économique précise (génération d'orbe passive)
+# -- portée bien plus étroite que l'ancien design généralisé à tout le monde.
+#
+# Circle of Light : LIMITE CONNUE, PAS résolue ici (cf. note de l'utilisateur
+# sur le cône d'effet) -- ce moteur n'a AUCUNE détection de position/distance
+# entre alliés, seulement des %HP. Impossible de vérifier qu'un allié blessé
+# est physiquement dans le petit cône avant de lancer le sort ; on continue
+# de viser le tank comme point d'ancrage (même hypothèse de ciblage que
+# vigour_pre_tick) sans garantie qu'il soit dans la zone. Gap connu et
+# volontairement non traité ici, pas un bug à corriger par réflexe.
+#
+# EN: VIGOUR -- EARLY GAME ROTATION (before talent tier 4), 2026-07-16.
+# EN: Provided by the user as a DISTINCT priority list from the Legendary
+# EN: Cloak rotation above (post-4th-row, cf. vigour_pre_tick) -- NOT a
+# EN: replacement: the two coexist. This is exactly why Radiant Blast was
+# EN: already declared in config/vigour.yaml but never wired (cf. the
+# EN: original comment: "listed in the guide ONLY for the PRE-4th-row
+# EN: rotation") -- this function finally wires it.
+# EN:
+# EN: Selection: STATIC, in game_config.py::CHARACTERS["vigour"] -- a
+# EN: one-shot event in a character's lifetime (you never drop back below
+# EN: tier 4 once reached), so a simple function choice at startup is
+# EN: enough, no need for a flag or an in-game toggle key. game_config.py
+# EN: currently points at vigour_pre_tick_early_game/vigour_post_tick_
+# EN: early_game (2026-07-16, "in-game right now" implicit at the moment the
+# EN: user provided this list) -- switch back to vigour_pre_tick/vigour_
+# EN: post_tick once talent tier 4 (Legendary Cloak build) is reached.
+# EN:
+# EN: Priority order as provided by the user (2026-07-16):
+# EN:   1. Buff uptime (absolute priority) -- Rune Of Renewal on the TANK as
+# EN:      soon as absent or about to fade (fuels passive orb generation)
+# EN:   2. Tank emergency -- Greater Heal if tank < 70%, extended to the rest
+# EN:      of the group only if the situation degenerates
+# EN:   3. Rune generation -- Dawnbreaker Orb then Radiant Blast, as soon as
+# EN:      off cooldown
+# EN:   4. Rune spend (cap rule) -- gauge >= 5: Luminous Barrier (an ally
+# EN:      taking damage) or Soulbrand (an enemy)
+# EN:   5. Group heal (AoE) -- Circle of Light if multiple allies lose HP
+# EN:      simultaneously
+# EN:   6. Filler -- Dawnflare on loop
+# EN:
+# EN: 2 ADDITIONS NOT EXPLICITLY REQUESTED, documented so they can be
+# EN: corrected:
+# EN:   - Item 0 (Critical <30%, ANY ally) placed ABOVE (1): the user didn't
+# EN:     re-ask for this here, but a dying ally must come before buff
+# EN:     upkeep, cf. the same threshold vigour_pre_tick already uses
+# EN:     (VIGOUR_CRITICAL_HP_THRESHOLD). Directly covers (2)'s "extended to
+# EN:     the rest of the group if the situation degenerates" clause -- no
+# EN:     need for a separately invented number.
+# EN:   - Cleanse (Remove Magic) inserted right after, by continuity with
+# EN:     vigour_pre_tick -- absent from the provided list, but a lingering
+# EN:     debuff doesn't resolve itself.
+# EN:
+# EN: Radiant Blast (2026-07-16, confirmed by the user): costs MANA, NOT an
+# EN: orb -- same mana-drain risk as Greater Heal if spammed without limit
+# EN: (cf. the user's "common mistakes"). Gated by VIGOUR_EARLY_GAME_
+# EN: RADIANT_BLAST_MANA_FLOOR, a threshold OF OUR OWN CHOOSING (not provided
+# EN: by the user) -- adjust if too conservative or not conservative enough
+# EN: in-game.
+# EN:
+# EN: Rune Of Renewal: timer reintroduced, but scoped ONLY TO THE TANK (a
+# EN: single target, a single timestamp) -- NOT a rehash of the "every 25s
+# EN: on all 4 allies" timer removed above (the cause of the reported spam):
+# EN: here it's the GUIDE ITSELF explicitly asking for this specific uptime,
+# EN: on a specific role, for a specific economic reason (passive orb
+# EN: generation) -- much narrower scope than the old design generalized to
+# EN: everyone.
+# EN:
+# EN: Circle of Light: KNOWN LIMITATION, NOT resolved here (cf. the user's
+# EN: note on the effect's cone) -- this engine has NO position/distance
+# EN: detection between allies, only %HP. Impossible to verify a hurt ally is
+# EN: physically inside the small cone before casting; still aims at the
+# EN: tank as an anchor point (same targeting hypothesis as vigour_pre_tick)
+# EN: with no guarantee they're in the area. Known gap, deliberately not
+# EN: addressed here, not a bug to fix by reflex.
+VIGOUR_EARLY_GAME_TANK_HP_THRESHOLD = 0.70
+VIGOUR_EARLY_GAME_RUNE_OF_RENEWAL_REFRESH_WINDOW_S = 25.0   # même marge proactive que l'ancien design (30s de durée réelle, cf. tooltip) -- pas la cause du spam, seule sa portée (tout le monde) l'était · EN: same proactive margin as the old design (30s real duration, cf. tooltip) -- not the cause of the spam, only its scope (everyone) was
+VIGOUR_EARLY_GAME_RUNE_CAP_THRESHOLD = 5
+VIGOUR_EARLY_GAME_RADIANT_BLAST_MANA_FLOOR = 0.30   # notre propre choix, pas fourni par l'utilisateur -- réserve du mana pour Greater Heal · EN: our own choice, not provided by the user -- reserves mana for Greater Heal
+
+
+def vigour_pre_tick_early_game(state: CombatState) -> list[Intent]:
+    """Câblé comme pre_tick_hook (cf. RotationEngine, engine.py::Intent) --
+    même contrat que vigour_pre_tick : retourne une liste d'Intent, poids 90,
+    ou [] si rien à proposer. Cf. commentaire de tête ci-dessus pour l'ordre
+    de priorité complet et son origine."""
+    now = time.monotonic()
+    if now < state.gcd_until:
+        return []   # même gate GCD explicite que vigour_pre_tick -- cf. CLAUDE.md bug #1
+
+    meta = state.detection_meta.get("vigour_party_bars")
+    if meta is None or VIGOUR_PARTY_FRESHNESS_POLICY.classify(meta.age_ms(now=now)) == Freshness.EXPIRED:
+        return []   # donnée trop vieille ou jamais lue -- ne rien affirmer sur la vie du groupe
+
+    party = state.party
+    alive = {i: p for i, p in party.items() if p.get("present")}
+    orbs = state.resources.get("orbs", 0)
+    mana = state.resources.get("mana", 1.0)
+    tank = alive.get(VIGOUR_TANK_SLOT)
+
+    # 0. Critique (<30%, n'importe quel allié) -- AJOUT (pas dans la liste
+    # fournie), cf. commentaire de tête. Couvre la clause "étendu si la
+    # situation dégénère" de l'item 2 sans inventer un chiffre séparé.
+    critical = {
+        i: p for i, p in alive.items()
+        if p.get("hp_pct") is not None and p["hp_pct"] < VIGOUR_CRITICAL_HP_THRESHOLD
+    }
+    if critical:
+        worst = min(critical, key=lambda i: critical[i]["hp_pct"])
+        return [Intent(ability="greater_heal", target=f"player_{worst}", weight=90, source="vigour_pre_tick_early_game")]
+
+    # 1. Cleanse -- AJOUT (pas dans la liste fournie), cf. commentaire de tête.
+    cleanse_target = next((i for i, p in alive.items() if p.get("cleanse_needed")), None)
+    if cleanse_target is not None:
+        return [Intent(ability="remove_magic", target=f"player_{cleanse_target}", weight=90, source="vigour_pre_tick_early_game")]
+
+    # 2. Uptime du buff (priorité absolue, guide) -- Rune Of Renewal sur le
+    # tank dès qu'absent ou sur le point de s'estomper (timer scopé au tank
+    # seul, cf. commentaire de tête).
+    if tank is not None and orbs >= VIGOUR_RUNE_OF_RENEWAL_ORB_COST:
+        applied_at = state.hooks.get("early_game_rune_of_renewal_tank_applied_at", 0.0)
+        if now - applied_at >= VIGOUR_EARLY_GAME_RUNE_OF_RENEWAL_REFRESH_WINDOW_S:
+            state.hooks["_early_game_rune_of_renewal_pending"] = True
+            return [Intent(ability="rune_of_renewal", target=f"player_{VIGOUR_TANK_SLOT}", weight=90, source="vigour_pre_tick_early_game")]
+
+    # 3. Urgence tank (guide) -- Greater Heal si tank < 70% (routine, cible
+    # spécifiquement le tank -- l'extension au reste du groupe est déjà
+    # couverte par l'item 0 ci-dessus).
+    if tank is not None and tank.get("hp_pct") is not None and tank["hp_pct"] < VIGOUR_EARLY_GAME_TANK_HP_THRESHOLD:
+        return [Intent(ability="greater_heal", target=f"player_{VIGOUR_TANK_SLOT}", weight=90, source="vigour_pre_tick_early_game")]
+
+    # 4. Génération de runes (guide) -- Dawnbreaker Orb (2 orbes) en 1er
+    # choix dès que hors cooldown, cible le plus bas en vie même si personne
+    # n'est bas (le but ici est l'orbe généré, pas le soin -- overheal
+    # accepté, contrairement à Greater Heal qui reste strictement gaté par
+    # le HP pour éviter le vidage de mana). Sinon Radiant Blast (mana, PAS
+    # d'orbe -- cf. commentaire de tête), gaté par un plancher de mana.
+    if orbs >= VIGOUR_DAWNBREAKER_ORB_COST and alive and not state.is_on_cooldown("dawnbreaker_orb", now):
+        worst = min(alive, key=lambda i: alive[i]["hp_pct"] if alive[i].get("hp_pct") is not None else 1.0)
+        return [Intent(ability="dawnbreaker_orb", target=f"player_{worst}", weight=90, source="vigour_pre_tick_early_game")]
+    if mana >= VIGOUR_EARLY_GAME_RADIANT_BLAST_MANA_FLOOR and not state.is_on_cooldown("radiant_blast", now):
+        return [Intent(ability="radiant_blast", weight=90, source="vigour_pre_tick_early_game")]
+
+    # 5. Dépense des runes (règle du cap, guide) -- >= 5 orbes : dépenser
+    # MAINTENANT plutôt que d'attendre le plafond de 6. Luminous Barrier sur
+    # un allié qui encaisse des dégâts (pas au maximum), sinon Soulbrand
+    # (cible ennemie, toujours disponible).
+    if orbs >= VIGOUR_EARLY_GAME_RUNE_CAP_THRESHOLD:
+        hurt = {
+            i: p for i, p in alive.items()
+            if p.get("hp_pct") is not None and p["hp_pct"] < VIGOUR_FULL_HP_THRESHOLD
+        }
+        if hurt and not state.is_on_cooldown("luminous_barrier", now):
+            worst = min(hurt, key=lambda i: hurt[i]["hp_pct"])
+            return [Intent(ability="luminous_barrier", target=f"player_{worst}", weight=90, source="vigour_pre_tick_early_game")]
+        return [Intent(ability="soulbrand", weight=90, source="vigour_pre_tick_early_game")]
+
+    # 6. Soin de groupe AoE (guide) -- Circle of Light si plusieurs alliés
+    # perdent de la vie simultanément. Cf. commentaire de tête pour la
+    # limite connue (pas de détection de position/cône).
+    group_hurt = sum(
+        1 for p in alive.values()
+        if p.get("hp_pct") is not None and p["hp_pct"] < VIGOUR_HURT_HP_THRESHOLD
+    )
+    if group_hurt >= VIGOUR_GROUP_DAMAGE_MIN_HURT_ALLIES and tank is not None and not state.is_on_cooldown("circle_of_light", now):
+        return [Intent(ability="circle_of_light", target=f"player_{VIGOUR_TANK_SLOT}", weight=90, source="vigour_pre_tick_early_game")]
+
+    # 7. Filler (guide) -- Dawnflare en boucle, jamais de temps mort.
+    return [Intent(ability="dawnflare", weight=90, source="vigour_pre_tick_early_game")]
+
+
+def vigour_post_tick_early_game(state: CombatState, pressed: str) -> None:
+    """Confirme l'horodatage de Rune Of Renewal sur le tank UNIQUEMENT si ce
+    sort a RÉELLEMENT été le sort pressé ce tick -- même principe que
+    l'ancien design retiré (cf. commentaire de tête de vigour_pre_tick),
+    mais scopé à UNE seule cible (le tank), pas les 4 alliés.
+
+    EN: Confirms Rune Of Renewal's timestamp on the tank ONLY if this spell
+    EN: was ACTUALLY the one pressed this tick -- same principle as the old
+    EN: removed design (cf. vigour_pre_tick's header comment), but scoped to
+    EN: a SINGLE target (the tank), not all 4 allies.
+    """
+    if pressed == "rune_of_renewal" and state.hooks.pop("_early_game_rune_of_renewal_pending", False):
+        state.hooks["early_game_rune_of_renewal_tank_applied_at"] = time.monotonic()

@@ -1,0 +1,148 @@
+# =============================================================================
+# vigour.yaml — config du moteur wardenbot pour Vigour (Healer), build
+# Legendary Cloak (2026-07-16, cf. method.gg/fellowship/heroes/vigour +
+# playstyle-and-rotation, talents + priorité post-4e-ligne) -- décision
+# entièrement pilotée par hooks.py::vigour_pre_tick (poids 90), comme
+# meiko_pre_tick pour Meiko. Toutes les abilities sont skip_detection:true :
+# leur icône n'est jamais vérifiée par template matching, seul le hook décide
+# quand les presser.
+#
+# Noms et cooldowns RÉELS (2026-07-16, fournis par l'utilisateur -- PAS des
+# valeurs inventées comme le 1er jet de cette config) :
+#   Greater Heal      : cast 1.99s (pas de cooldown propre)
+#   Circle of Light   : cooldown 14.95s -- AoE, cible normalement le SOL sous
+#                        les pieds d'un joueur (pas une unité) -- cf.
+#                        hooks.py pour l'hypothèse de contournement (cibler
+#                        un allié via le mécanisme de ciblage existant, PAS
+#                        vérifié en jeu).
+#   Remove Magic      : cooldown 6s (2026-07-16, renommé depuis "Dispell" --
+#                        nom d'ability réel donné avec les touches, "Dispell"
+#                        n'était qu'une description du type de sort)
+#   Rune Of Renewal   : consomme 1 orbe, pas de cooldown propre
+#   Dawnbreaker Orb   : cooldown 9.97s, consomme 2 orbes
+#   Luminous Barrier  : cooldown 19.94s, consomme 1 orbe
+#   Dawnflare         : cast 1.50s, génère 1 orbe, dégâts MONOCIBLE (cible un
+#                        ennemi, pas un allié -- cf. hooks.py, Intent.target
+#                        reste None pour ce sort)
+#   Radiant Blast     : cooldown 9.97s -- listée dans le guide UNIQUEMENT
+#                        pour la rotation PRÉ-4e-ligne, absente de la
+#                        rotation post-4e-ligne (celle du build Legendary
+#                        Cloak) -- déclarée ici mais PAS câblée dans
+#                        hooks.py::vigour_pre_tick.
+#   Soulbrand         : pas de cooldown, consomme 1 orbe -- EFFET CONFIRMÉ
+#                        (2026-07-16, tooltip fourni) : débuff de DÉGÂTS sur
+#                        un ENNEMI (823-1006 instantané + DoT 274-335/2.99s
+#                        sur 24s), qui régénère 30% d'un orbe + 1% mana max
+#                        ÉTALÉ sur ces 24s (pas immédiat). CÂBLÉE dans
+#                        hooks.py::vigour_pre_tick (2026-07-16, "l'essence du
+#                        personnage" -- Vigour ne doit jamais rester inactif)
+#                        -- utilisée UNIQUEMENT une fois le plafond de 6
+#                        orbes atteint (Dawnflare, gratuit et immédiat, reste
+#                        strictement meilleur pour la seule génération et
+#                        garde donc la priorité tant qu'il reste de la place
+#                        sous le plafond).
+#
+# gcd_ms — l'utilisateur a dit explicitement de laisser 1100ms (2026-07-16)
+# -- valeur Meiko réutilisée par choix, PAS mesurée spécifiquement pour
+# Vigour. À corriger si un jour une vraie capture 30fps de sa barre
+# d'abilities donne un chiffre différent (même méthodologie que gcd_ms pour
+# Meiko).
+#
+# EN: vigour.yaml — wardenbot engine config for Vigour (Healer), Legendary
+# EN: Cloak build (2026-07-16, cf. method.gg/fellowship/heroes/vigour +
+# EN: playstyle-and-rotation, talents + post-4th-row priority) -- decision
+# EN: entirely driven by hooks.py::vigour_pre_tick (weight 90), like
+# EN: meiko_pre_tick for Meiko. Every ability is skip_detection:true: its
+# EN: icon is never checked via template matching, only the hook decides
+# EN: when to press it.
+#
+# EN: REAL names and cooldowns (2026-07-16, provided by the user -- NOT
+# EN: invented values like this config's first draft):
+# EN:   Greater Heal      : 1.99s cast (no cooldown of its own)
+# EN:   Circle of Light   : 14.95s cooldown -- AoE, normally targets the
+# EN:                        GROUND at a player's feet (not a unit) -- cf.
+# EN:                        hooks.py for the workaround hypothesis (target
+# EN:                        an ally via the existing targeting mechanism,
+# EN:                        NOT verified in-game).
+# EN:   Remove Magic      : 6s cooldown (2026-07-16, renamed from "Dispell" --
+# EN:                        the real ability name given along with the
+# EN:                        keybinds, "Dispell" was only a description of
+# EN:                        the spell's type)
+# EN:   Rune Of Renewal   : consumes 1 orb, no cooldown of its own
+# EN:   Dawnbreaker Orb   : 9.97s cooldown, consumes 2 orbs
+# EN:   Luminous Barrier  : 19.94s cooldown, consumes 1 orb
+# EN:   Dawnflare         : 1.50s cast, generates 1 orb, SINGLE-TARGET damage
+# EN:                        (targets an enemy, not an ally -- cf. hooks.py,
+# EN:                        Intent.target stays None for this spell)
+# EN:   Radiant Blast     : 9.97s cooldown -- listed in the guide ONLY for
+# EN:                        the PRE-4th-row rotation, absent from the
+# EN:                        post-4th-row rotation (the Legendary Cloak
+# EN:                        build's) -- declared here but NOT wired into
+# EN:                        hooks.py::vigour_pre_tick.
+# EN:   Soulbrand         : no cooldown, consumes 1 orb -- CONFIRMED EFFECT
+# EN:                        (2026-07-16, tooltip provided): a DAMAGE debuff
+# EN:                        on an ENEMY (823-1006 instant + 274-335/2.99s DoT
+# EN:                        over 24s), which regenerates 30% of an orb + 1%
+# EN:                        max mana SPREAD over those 24s (not immediate).
+# EN:                        WIRED into hooks.py::vigour_pre_tick (2026-07-16,
+# EN:                        "the character's essence" -- Vigour must never
+# EN:                        sit idle) -- used ONLY once the 6-orb cap is
+# EN:                        reached (Dawnflare, free and instant, stays
+# EN:                        strictly better for pure generation and keeps
+# EN:                        priority as long as there's room under the cap).
+#
+# EN: gcd_ms — the user explicitly said to leave it at 1100ms (2026-07-16) --
+# EN: Meiko's value reused by choice, NOT specifically measured for Vigour.
+# EN: To correct if a real 30fps capture of its ability bar someday gives a
+# EN: different number (same methodology as gcd_ms for Meiko).
+# =============================================================================
+
+gcd_ms: 1100   # laissé volontairement à cette valeur (choix explicite de l'utilisateur, 2026-07-16) -- valeur Meiko, pas mesurée pour Vigour
+
+abilities:
+  - name: greater_heal
+    priority_st: 1
+    skip_detection: true
+    cooldown_ms: 0
+
+  - name: circle_of_light
+    priority_st: 2
+    skip_detection: true
+    cooldown_ms: 14950
+
+  - name: remove_magic
+    priority_st: 3
+    skip_detection: true
+    cooldown_ms: 6000
+
+  - name: rune_of_renewal
+    priority_st: 4
+    skip_detection: true
+    cooldown_ms: 0
+
+  - name: dawnbreaker_orb
+    priority_st: 5
+    skip_detection: true
+    cooldown_ms: 9970
+
+  - name: luminous_barrier
+    priority_st: 6
+    skip_detection: true
+    cooldown_ms: 19940
+
+  - name: dawnflare
+    priority_st: 7
+    skip_detection: true
+    cooldown_ms: 0
+
+  # Déclarées mais PAS câblées dans hooks.py::vigour_pre_tick -- cf. commentaire
+  # de tête pour la raison précise de chacune.
+  - name: radiant_blast
+    priority_st: 8
+    skip_detection: true
+    cooldown_ms: 9970
+
+  - name: soulbrand
+    priority_st: 9
+    skip_detection: true
+    cooldown_ms: 0
