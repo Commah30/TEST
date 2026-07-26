@@ -75,7 +75,7 @@ abilities:
     off_gcd: true
     skip_detection: true
     cooldown_ms: 2000
-    condition: "not buff:toxic_lash_active, energy_above:200"
+    condition: "not buff:toxic_lash_active, resource_value_above:energy:200"
 
   # Touche 4 : Nourish (Helminth) -- même logique, décompte propre (20.62s).
   - name: nourish
@@ -83,4 +83,4 @@ abilities:
     off_gcd: true
     skip_detection: true
     cooldown_ms: 2000
-    condition: "not buff:nourish_active, energy_above:200"
+    condition: "not buff:nourish_active, resource_value_above:energy:200"

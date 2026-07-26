@@ -38,7 +38,7 @@ lisible, pas un hook opaque.
 #### Tariq (`config/tariq.yaml`, `hooks.py::tariq_pre_tick`)
 
 Rotation en liste de priorité classique (pas de séquence à compléter). Les
-abilities scannent leurs conditions (`fury_above:N`, `flag:X`, `buff:X`,
+abilities scannent leurs conditions (`resource_above:fury:N`, `flag:X`, `buff:X`,
 `debuff:X`) dans l'ordre de priorité à chaque tick. Points notables :
 
 - **Hammer Storm** part sur n'importe quel proc détecté, immédiatement (pas
@@ -83,9 +83,10 @@ Premier personnage hors Fellowship. **Assistant à 2 sorts (Toxic Lash,
 Nourish), volontairement PAS un autopilote complet** — visée/déplacement et
 le 3e sort restent à la main de l'utilisateur (cf. commentaire de tête du
 YAML, réserve explicite sur les CGU Warframe). Chaque sort se relance dès
-que son buff est retombé ET que l'Énergie dépasse 200 (`energy_above:200` —
-lit une valeur ABSOLUE via OCR, pas un pourcentage 0-1.0 comme
-`fury_above`/`toughness_above`, cf. `test_saryn.py`). Pas de GCD partagé
+que son buff est retombé ET que l'Énergie dépasse 200
+(`resource_value_above:energy:200` — lit une valeur ABSOLUE via OCR, pas un
+pourcentage 0-1.0 comme `resource_above:fury:N`/`resource_above:toughness:N`,
+cf. `test_saryn.py`). Pas de GCD partagé
 façon Fellowship : les deux abilities sont `off_gcd` + `skip_detection`
 (gatées par condition, pas par template d'icône).
 
@@ -375,8 +376,8 @@ decision at the 3rd stack of Warden of the Temple is a plain, readable
 #### Tariq (`config/tariq.yaml`, `hooks.py::tariq_pre_tick`)
 
 A classic priority-list rotation (no sequence to complete). Abilities scan
-their conditions (`fury_above:N`, `flag:X`, `buff:X`, `debuff:X`) in priority
-order every tick. Notable points:
+their conditions (`resource_above:fury:N`, `flag:X`, `buff:X`, `debuff:X`) in
+priority order every tick. Notable points:
 
 - **Hammer Storm** fires on any detected proc, immediately (no waiting for a
   2nd stack — the game never shows "2" on that badge).
@@ -419,9 +420,10 @@ First non-Fellowship character. **A 2-spell assistant (Toxic Lash,
 Nourish), deliberately NOT a full autopilot** — aim/movement and the 3rd
 spell stay in the user's hands (cf. the YAML's header comment, an explicit
 caveat about Warframe's ToS). Each spell refires as soon as its buff has
-fallen off AND Energy is above 200 (`energy_above:200` — reads an ABSOLUTE
-value via OCR, not a 0-1.0 percentage like `fury_above`/`toughness_above`,
-cf. `test_saryn.py`). No shared GCD Fellowship-style: both abilities are
+fallen off AND Energy is above 200 (`resource_value_above:energy:200` —
+reads an ABSOLUTE value via OCR, not a 0-1.0 percentage like
+`resource_above:fury:N`/`resource_above:toughness:N`, cf. `test_saryn.py`).
+No shared GCD Fellowship-style: both abilities are
 `off_gcd` + `skip_detection` (gated by condition, not by icon template).
 
 ### Architecture

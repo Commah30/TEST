@@ -76,12 +76,14 @@ def test_shield_throw_proc_skips_detection_and_gates_on_the_ready_flag():
 
 def test_shields_up_condition_reads_toughness_not_mana():
     """Le token de la spec fournie (`not mana_above:40`) n'existe pas dans le
-    moteur -- corrigé en `not toughness_above:40` (cf. engine.py::_eval_token,
-    2026-07-18). Vérifie la vraie condition telle qu'elle est chargée depuis
-    le YAML, pas une réécriture à la main dans ce test."""
+    moteur -- corrigé en `not resource_above:toughness:40` (cf.
+    engine.py::_eval_token, 2026-07-18 ; token générique resource_above
+    depuis la généricité du moteur, 2026-07-26). Vérifie la vraie condition
+    telle qu'elle est chargée depuis le YAML, pas une réécriture à la main
+    dans ce test."""
     abilities, _ = load_abilities("config/helena.yaml")
     shields_up = next(a for a in abilities if a.name == "shields_up")
-    assert shields_up.condition == "not toughness_above:40"
+    assert shields_up.condition == "not resource_above:toughness:40"
 
     state = CombatState()
     state.resources["toughness"] = 0.30
@@ -94,12 +96,12 @@ def test_shields_up_condition_reads_toughness_not_mana():
 def test_toughness_defaults_to_zero_when_never_detected():
     """Avant que make_helena_state_update_fn tourne au moins un tick (ou si le
     profil n'a pas la région toughness_bar), la ressource vaut 0.0 par
-    défaut -- donc `not toughness_above:40` reste VRAI en permanence et
-    Shields Up part à chaque fois qu'il est off-cooldown. Comportement
-    ATTENDU pré-détection, pas un bug."""
+    défaut -- donc `not resource_above:toughness:40` reste VRAI en
+    permanence et Shields Up part à chaque fois qu'il est off-cooldown.
+    Comportement ATTENDU pré-détection, pas un bug."""
     state = CombatState()
-    assert evaluate_condition("not toughness_above:40", state) is True
-    print("Sans détection, toughness_above reste à 0 -> Shields Up jamais gaté (comportement attendu).")
+    assert evaluate_condition("not resource_above:toughness:40", state) is True
+    print("Sans détection, resource_above:toughness reste à 0 -> Shields Up jamais gaté (comportement attendu).")
 
 
 def test_toughness_bar_reader_reads_full_bar_despite_threshold_tick_marks():

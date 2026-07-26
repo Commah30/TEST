@@ -86,10 +86,10 @@ abilities:
 #
 # MUTUELLE EXCLUSION build/spend : Rising Storm et Lashing Stormkick partagent
 # le même déclencheur (last:wind_kick) mais divergent selon Stormfall --
-# leurs conditions d'ENTRÉE utilisent stormfall_above:99.9 (cf.
+# leurs conditions d'ENTRÉE utilisent resource_above:stormfall:99.9 (cf.
 # engine.py::_eval_token, 2026-07-14) pour rester mutuellement exclusives,
 # exactement comme le `if stormfall >= 0.999: ... else: ...` de hooks.py.
-# Même principe pour Rising Earth / Earthfist Barrage avec earthfall_above.
+# Même principe pour Rising Earth / Earthfist Barrage avec resource_above:earthfall.
 #
 # meiko_pre_tick (poids 90, cf. hooks.py) garde le dernier mot PENDANT TOUTE
 # LA TRANSITION pour les 4 : dès que last_cast == wind_kick/earth_fist, sa
@@ -129,10 +129,10 @@ abilities:
 # EN:
 # EN: build/spend MUTUAL EXCLUSION: Rising Storm and Lashing Stormkick share
 # EN: the same trigger (last:wind_kick) but diverge on Stormfall -- their
-# EN: ENTRY conditions use stormfall_above:99.9 (cf. engine.py::_eval_token,
+# EN: ENTRY conditions use resource_above:stormfall:99.9 (cf. engine.py::_eval_token,
 # EN: 2026-07-14) to stay mutually exclusive, exactly like hooks.py's `if
 # EN: stormfall >= 0.999: ... else: ...`. Same principle for Rising Earth /
-# EN: Earthfist Barrage with earthfall_above.
+# EN: Earthfist Barrage with resource_above:earthfall.
 # EN:
 # EN: meiko_pre_tick (weight 90, cf. hooks.py) keeps the last word DURING THE
 # EN: WHOLE TRANSITION for all 4: as soon as last_cast == wind_kick/
@@ -155,10 +155,10 @@ abilities:
 # BUG TROUVÉ EN JEU (2026-07-17, rapport de session l'utilisateur, cf. hooks.py::
 # STORM_EARTH_SPEND_THRESHOLD) : Lashing Stormkick/Earthfist Barrage ne
 # consomment qu'UN SEUL orbe par cast, pas les deux -- les conditions
-# d'entrée ci-dessous utilisaient stormfall_above:99.9/earthfall_above:99.9
+# d'entrée ci-dessous utilisaient resource_above:stormfall:99.9/resource_above:earthfall:99.9
 # (les 2 orbes) comme seuil de "spend", exactement le même bug que celui
 # corrigé dans hooks.py. Seuil abaissé à 0.1 (> 0, cf. even
-# stormfall_above:N -> resources["stormfall"]*100 >= N) pour dépenser dès
+# resource_above:stormfall:N -> resources["stormfall"]*100 >= N) pour dépenser dès
 # qu'AU MOINS un orbe est disponible -- ces séquences restent en mode
 # fantôme (poids 80 < 90, cf. hooks.py::meiko_pre_tick) donc ce changement
 # n'a AUCUN effet observable en jeu aujourd'hui, seulement sur la cohérence
@@ -166,16 +166,16 @@ abilities:
 # EN: BUG FOUND IN-GAME (2026-07-17, the user's session report, cf. hooks.py::
 # EN: STORM_EARTH_SPEND_THRESHOLD): Lashing Stormkick/Earthfist Barrage only
 # EN: consume ONE orb per cast, not both -- the entry conditions below used
-# EN: stormfall_above:99.9/earthfall_above:99.9 (both orbs) as the "spend"
+# EN: resource_above:stormfall:99.9/resource_above:earthfall:99.9 (both orbs) as the "spend"
 # EN: threshold, the exact same bug fixed in hooks.py. Threshold lowered to
-# EN: 0.1 (> 0, cf. stormfall_above:N -> resources["stormfall"]*100 >= N) to
+# EN: 0.1 (> 0, cf. resource_above:stormfall:N -> resources["stormfall"]*100 >= N) to
 # EN: spend as soon as AT LEAST one orb is available -- these sequences stay
 # EN: in shadow mode (weight 80 < 90, cf. hooks.py::meiko_pre_tick) so this
 # EN: change has NO observable effect in-game today, only on the consistency
 # EN: of state.sequences["active_sequence"] for future debugging.
 sequences:
   - name: meiko_rising_storm
-    condition: "last:wind_kick, not stormfall_above:0.1"
+    condition: "last:wind_kick, not resource_above:stormfall:0.1"
     interruptible: true
     steps:
       - ability: spirit_palm_2
@@ -184,7 +184,7 @@ sequences:
         condition: "last:spirit_palm_2"
 
   - name: meiko_lashing_stormkick
-    condition: "last:wind_kick, stormfall_above:0.1"
+    condition: "last:wind_kick, resource_above:stormfall:0.1"
     interruptible: true
     steps:
       - ability: earth_fist_2
@@ -193,7 +193,7 @@ sequences:
         condition: "last:earth_fist_2"
 
   - name: meiko_rising_earth
-    condition: "last:earth_fist, not earthfall_above:0.1"
+    condition: "last:earth_fist, not resource_above:earthfall:0.1"
     interruptible: true
     steps:
       - ability: spirit_palm_2
@@ -202,7 +202,7 @@ sequences:
         condition: "last:spirit_palm_2"
 
   - name: meiko_earthfist_barrage
-    condition: "last:earth_fist, earthfall_above:0.1"
+    condition: "last:earth_fist, resource_above:earthfall:0.1"
     interruptible: true
     steps:
       - ability: wind_kick_2

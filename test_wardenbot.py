@@ -647,8 +647,9 @@ def test_sequence_never_overrides_active_meiko_pre_tick_hook():
     hook et la séquence proposent la même ability (build) ou des abilities
     DIFFÉRENTES (spend, qui pose en plus un stack de Warden of the Temple,
     cf. hooks.py). Vérifie aussi que la bonne séquence s'active en parallèle
-    (mutuelle exclusion build/spend via stormfall_above/earthfall_above,
-    engine.py::_eval_token) sans jamais avancer d'un cran."""
+    (mutuelle exclusion build/spend via resource_above:stormfall/
+    resource_above:earthfall, engine.py::_eval_token) sans jamais avancer
+    d'un cran."""
     _, meta = load_abilities("config/warden.yaml")
     sequences = parse_sequences(meta.get("sequences"))
 

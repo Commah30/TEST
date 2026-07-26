@@ -834,7 +834,7 @@ MIN_ABSENT_TICKS = 3
 # hammer_storm_proc réelles, 11 sont parties avec hammer_storm_empowered déjà
 # lu absent depuis 33 à 1120 ticks (~0.5s à ~18.7s à 60Hz). Root cause :
 # XXX_ready n'expirait JAMAIS une fois armé -- seul un vrai cast confirmé
-# (tariq_post_tick) l'effaçait. Si fury_above:55 (ou le seuil réduit sous
+# (tariq_post_tick) l'effaçait. Si resource_above:fury:55 (ou le seuil réduit sous
 # Focused Wrath) mettait du temps à être atteint après l'armement, le proc
 # restait consommable indéfiniment, bien après que son glow ait disparu à
 # l'écran. TARIQ_PROC_EXPIRE_S = 30.0 : durée RÉELLE du proc confirmée par
@@ -853,7 +853,7 @@ MIN_ABSENT_TICKS = 3
 # EN: 119 real hammer_storm_proc presses, 11 fired with hammer_storm_empowered
 # EN: already read absent for 33 to 1120 ticks (~0.5s to ~18.7s at 60Hz). Root
 # EN: cause: XXX_ready NEVER expired once armed -- only a real confirmed cast
-# EN: (tariq_post_tick) cleared it. If fury_above:55 (or the reduced threshold
+# EN: (tariq_post_tick) cleared it. If resource_above:fury:55 (or the reduced threshold
 # EN: under Focused Wrath) took a while to be reached after arming, the proc
 # EN: stayed consumable indefinitely, long after its glow had disappeared on
 # EN: screen. TARIQ_PROC_EXPIRE_S = 30.0: the proc's REAL duration confirmed
@@ -922,7 +922,7 @@ HAMMER_STORM_LOCK_REFRESH_S = 0.2   # marge au-delà du tick courant -- absorbe 
 # BUG TROUVÉ EN JEU (2026-07-12) : "hammerstorm ne fire pas quand il devrait"
 # -- vérifié sur fellowship.wiki.fextralife.com/Focused+Wrath : "Your next
 # two casts of Skull Crusher or Hammer Storm cost 50% less Fury". Tant que
-# focused_wrath_empowered est actif, la condition YAML fury_above:55/23
+# focused_wrath_empowered est actif, la condition YAML resource_above:fury:55/23
 # (coût plein) est trop stricte : elle bloque un proc dont le VRAI coût,
 # réduit de 50%, est déjà couvert. Seuils réduits ci-dessous, vérifiés en
 # général (pas liés aux stacks) puisque le buff peut venir du bot ou de Leap
@@ -961,7 +961,7 @@ HAMMER_STORM_LOCK_REFRESH_S = 0.2   # marge au-delà du tick courant -- absorbe 
 # EN: BUG FOUND IN-GAME (2026-07-12): "hammerstorm doesn't fire when it should"
 # EN: -- verified on fellowship.wiki.fextralife.com/Focused+Wrath: "Your next
 # EN: two casts of Skull Crusher or Hammer Storm cost 50% less Fury". While
-# EN: focused_wrath_empowered is active, the YAML condition fury_above:55/23
+# EN: focused_wrath_empowered is active, the YAML condition resource_above:fury:55/23
 # EN: (full cost) is too strict: it blocks a proc whose REAL cost, reduced by
 # EN: 50%, is already covered. Reduced thresholds below, checked generally (not
 # EN: stack-tied) since the buff can come from the bot or from Leap Smash cast
@@ -976,7 +976,7 @@ HAMMER_STORM_LOCK_REFRESH_S = 0.2   # marge au-delà du tick courant -- absorbe 
 # EN: the old threshold of 25 -- another possible cause, not explained by the
 # EN: measurement noise around the threshold). To watch.
 HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED = 30.0
-SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED = 12.0   # config/tariq.yaml : fury_above:23 (coût plein) / 2 -- pas de signal de détection dédié pour confirmer un cast Skull Crusher, donc pas de preuve pour ajuster ce seuil comme les deux ci-dessus (cf. skull_crusher_proc, non touché) · EN: config/tariq.yaml: fury_above:23 (full cost) / 2 -- no dedicated detection signal to confirm a Skull Crusher cast, so no proof to tune this threshold like the two above (cf. skull_crusher_proc, untouched)
+SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED = 12.0   # config/tariq.yaml : resource_above:fury:23 (coût plein) / 2 -- pas de signal de détection dédié pour confirmer un cast Skull Crusher, donc pas de preuve pour ajuster ce seuil comme les deux ci-dessus (cf. skull_crusher_proc, non touché) · EN: config/tariq.yaml: resource_above:fury:23 (full cost) / 2 -- no dedicated detection signal to confirm a Skull Crusher cast, so no proof to tune this threshold like the two above (cf. skull_crusher_proc, untouched)
 
 # BUG TROUVÉ EN JEU (2026-07-13, rapporté par l'utilisateur) : hammer_storm_proc
 # consommé (ready -> False dans tariq_post_tick) sur la seule foi d'avoir

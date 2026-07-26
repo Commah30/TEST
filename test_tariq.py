@@ -255,7 +255,7 @@ def test_ready_expires_after_the_real_proc_duration():
     assert state.hooks["hammer_storm_proc_ready"] is True
 
     # simule un armement vieux de TARIQ_PROC_EXPIRE_S + 1s, jamais consommé
-    # -- reproduit un fury_above:55 qui a mis longtemps à être atteint.
+    # -- reproduit un resource_above:fury:55 qui a mis longtemps à être atteint.
     state.hooks["_hammer_storm_proc_ready_armed_at"] = time.monotonic() - (TARIQ_PROC_EXPIRE_S + 1.0)
     tariq_pre_tick(state)
     assert state.hooks["hammer_storm_proc_ready"] is False, "ready aurait dû expirer après TARIQ_PROC_EXPIRE_S"
@@ -380,27 +380,29 @@ def test_condition_per_mode_falls_back_to_generic_condition():
     assert focused_wrath.condition_for("st") == "buff:skull_crusher_empowered"
     assert focused_wrath.condition_for("cleave") == "buff:hammer_storm_empowered"
 
-    hammer_storm_proc = Ability(name="hammer_storm_proc", condition="fury_above:51")
-    assert hammer_storm_proc.condition_for("aoe") == "fury_above:51"
+    hammer_storm_proc = Ability(name="hammer_storm_proc", condition="resource_above:fury:51")
+    assert hammer_storm_proc.condition_for("aoe") == "resource_above:fury:51"
     print("condition_for() : priorité au champ par-mode, sinon fallback sur `condition` générique.")
 
 
 def test_fury_above_condition_token():
     """Ressource nommée "fury" (pas "mana") -- confirmé par les tooltips en
-    jeu ("25 Fury", "50 Fury" sur Skull Crusher/Hammer Storm)."""
+    jeu ("25 Fury", "50 Fury" sur Skull Crusher/Hammer Storm). Token générique
+    resource_above:<name>:N (2026-07-26, généricité du moteur -- remplace
+    l'ancien fury_above fixe, cf. wardenbot/engine.py)."""
     state = CombatState()
     state.resources["fury"] = 0.50
-    assert evaluate_condition("fury_above:51", state) is False
-    assert evaluate_condition("fury_above:50", state) is True
-    assert evaluate_condition("not fury_above:76", state) is True
-    print("Token fury_above:N évalué correctement.")
+    assert evaluate_condition("resource_above:fury:51", state) is False
+    assert evaluate_condition("resource_above:fury:50", state) is True
+    assert evaluate_condition("not resource_above:fury:76", state) is True
+    print("Token resource_above:fury:N évalué correctement.")
 
 
 def test_chain_lightning_uses_normal_detection_with_only_fury_gate():
     """DÉTECTION NORMALE (2026-07-14, choix de l'utilisateur) : chain_lightning est
     repassée en détection standard -- elle matche sa PROPRE icône allumée via
     is_ready_fn (comme toute ability sans skip_detection), et sa condition YAML
-    ne garde plus que le gate de Fury (not fury_above:85). Plus de
+    ne garde plus que le gate de Fury (not resource_above:fury:85). Plus de
     'not debuff:chain_lightning_dim' (l'ancienne détection inversée du template
     grisé a été retirée, cf. config/tariq.yaml + wardenbot/state_update.py)."""
     abilities, _ = load_abilities("config/tariq.yaml")
@@ -418,7 +420,7 @@ def test_chain_lightning_uses_normal_detection_with_only_fury_gate():
     assert evaluate_condition(chain.condition, state) is False, "au-dessus de 85% Fury, chain_lightning doit être bloquée"
     state.resources["fury"] = 0.50
     assert evaluate_condition(chain.condition, state) is True, "sous 85% Fury, la condition passe (la détection template gère le reste)"
-    print("chain_lightning : détection normale, seul le gate de Fury (not fury_above:85) reste dans la condition.")
+    print("chain_lightning : détection normale, seul le gate de Fury (not resource_above:fury:85) reste dans la condition.")
 
 
 def test_bar_reader_ltr_and_rtl_directions():
@@ -596,7 +598,7 @@ def test_focused_wrath_discount_fires_skull_crusher_below_normal_threshold():
 
 def test_no_discount_without_focused_wrath_active():
     """Sans focused_wrath_empowered, le seuil réduit ne doit JAMAIS
-    s'appliquer -- le hook ne force rien, le scan normal (fury_above:55
+    s'appliquer -- le hook ne force rien, le scan normal (resource_above:fury:55
     plein, config/tariq.yaml) reste seul juge."""
     state = CombatState()
     state.hooks["hammer_storm_proc_ready"] = True
@@ -890,7 +892,7 @@ def test_fury_conserve_blocks_only_discretionary_skull_crusher_filler():
     assert evaluate_condition(by_name["skull_crusher_proc"].condition_for("st"), state) is True
     assert evaluate_condition(by_name["hammer_storm_proc"].condition_for("st"), state) is True
 
-    state.resources["fury"] = 0.5   # sous les seuils not fury_above des générateurs -- isole fury_conserve de leur propre garde anti-overcap
+    state.resources["fury"] = 0.5   # sous les seuils not resource_above:fury des générateurs -- isole fury_conserve de leur propre garde anti-overcap
     assert evaluate_condition(by_name["face_breaker"].condition_for("st"), state) is True
     assert evaluate_condition(by_name["chain_lightning"].condition_for("st"), state) is True
     assert evaluate_condition(by_name["wild_swing"].condition_for("st"), state) is True

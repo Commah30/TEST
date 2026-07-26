@@ -2,9 +2,11 @@
 test_saryn.py — prouve, sans écran ni jeu, que le premier personnage hors
 Fellowship (Saryn Prime, Warframe, cf. config/saryn.yaml, 2026-07-20) charge
 correctement et que ses 2 conditions (buff retombé + Énergie suffisante) se
-comportent exactement comme annoncé -- en particulier que `energy_above`
-compare une VALEUR ABSOLUE (lue en OCR), PAS un pourcentage comme les autres
-tokens `_above` (fury_above, toughness_above, etc.).
+comportent exactement comme annoncé -- en particulier que
+`resource_value_above` (token générique, cf. wardenbot/engine.py, généricité
+du moteur 2026-07-26 -- remplace l'ancien `energy_above` fixe) compare une
+VALEUR ABSOLUE (lue en OCR), PAS un pourcentage comme `resource_above`
+(utilisé par fury/toughness/stormfall/earthfall).
 
 Lance avec : python test_saryn.py
 Aucune dépendance externe (seul PyYAML est requis, via wardenbot.engine).
@@ -40,7 +42,7 @@ def test_both_abilities_are_off_gcd_and_skip_detection():
 def test_toxic_lash_condition_requires_buff_expired_and_energy_above_200():
     abilities, _ = load_abilities("config/saryn.yaml")
     toxic_lash = next(a for a in abilities if a.name == "toxic_lash")
-    assert toxic_lash.condition == "not buff:toxic_lash_active, energy_above:200"
+    assert toxic_lash.condition == "not buff:toxic_lash_active, resource_value_above:energy:200"
 
     state = CombatState()
     state.resources["energy"] = 250
@@ -59,7 +61,7 @@ def test_toxic_lash_condition_requires_buff_expired_and_energy_above_200():
 def test_nourish_condition_requires_buff_expired_and_energy_above_200():
     abilities, _ = load_abilities("config/saryn.yaml")
     nourish = next(a for a in abilities if a.name == "nourish")
-    assert nourish.condition == "not buff:nourish_active, energy_above:200"
+    assert nourish.condition == "not buff:nourish_active, resource_value_above:energy:200"
 
     state = CombatState()
     state.resources["energy"] = 300
@@ -72,36 +74,39 @@ def test_nourish_condition_requires_buff_expired_and_energy_above_200():
 
 
 def test_energy_above_compares_absolute_value_not_percentage():
-    """LE POINT CRITIQUE (2026-07-20) : contrairement à fury_above/
-    toughness_above/stormfall_above (qui multiplient resources[...] par 100,
-    lisant une barre de remplissage 0.0-1.0), energy_above compare la valeur
-    BRUTE -- l'Énergie Warframe est lue en OCR (read_digits) comme un nombre
-    absolu (110, 200...) contre une réserve dont le plafond varie avec les
-    mods, jamais normalisée 0.0-1.0. Si quelqu'un réintroduisait le *100 par
-    erreur (copier-coller depuis un autre token), ce test doit le détecter :
-    resources['energy']=200 doit satisfaire energy_above:200 (200 >= 200),
-    PAS échouer comme le ferait 200*100=20000 >= 200 (toujours vrai, masquant
-    le bug) ou 2.0 >= 200 (avec la valeur déjà pré-divisée, toujours faux)."""
+    """LE POINT CRITIQUE (2026-07-20, migré vers resource_value_above le
+    2026-07-26 -- généricité du moteur, cf. wardenbot/engine.py) :
+    contrairement à resource_above:<name>:N (utilisé par fury/toughness/
+    stormfall/earthfall, qui multiplie resources[...] par 100, lisant une
+    barre de remplissage 0.0-1.0), resource_value_above:<name>:N compare la
+    valeur BRUTE -- l'Énergie Warframe est lue en OCR (read_digits) comme un
+    nombre absolu (110, 200...) contre une réserve dont le plafond varie
+    avec les mods, jamais normalisée 0.0-1.0. Si quelqu'un réintroduisait le
+    *100 par erreur (copier-coller depuis resource_above), ce test doit le
+    détecter : resources['energy']=200 doit satisfaire
+    resource_value_above:energy:200 (200 >= 200), PAS échouer comme le
+    ferait 200*100=20000 >= 200 (toujours vrai, masquant le bug) ou
+    2.0 >= 200 (avec la valeur déjà pré-divisée, toujours faux)."""
     state = CombatState()
     state.resources["energy"] = 200.0
-    assert evaluate_condition("energy_above:200", state) is True, "200 d'énergie brute doit satisfaire energy_above:200"
+    assert evaluate_condition("resource_value_above:energy:200", state) is True, "200 d'énergie brute doit satisfaire resource_value_above:energy:200"
     state.resources["energy"] = 199.0
-    assert evaluate_condition("energy_above:200", state) is False, "199 < 200 -> ne doit pas satisfaire"
+    assert evaluate_condition("resource_value_above:energy:200", state) is False, "199 < 200 -> ne doit pas satisfaire"
     state.resources["energy"] = 1.0   # si quelqu'un stockait par erreur une valeur normalisee 0.0-1.0
-    assert evaluate_condition("energy_above:200", state) is False, (
-        "energy_above ne doit PAS multiplier par 100 -- une valeur normalisee par erreur doit rester sous le seuil"
+    assert evaluate_condition("resource_value_above:energy:200", state) is False, (
+        "resource_value_above ne doit PAS multiplier par 100 -- une valeur normalisee par erreur doit rester sous le seuil"
     )
-    print("energy_above compare bien la valeur absolue, pas un pourcentage (*100).")
+    print("resource_value_above compare bien la valeur absolue, pas un pourcentage (*100).")
 
 
 def test_energy_defaults_to_zero_when_never_detected():
     """Avant que make_saryn_state_update_fn tourne (ou si le profil n'a pas
-    la région 'energy'), la ressource vaut 0.0 par défaut -- energy_above:200
-    reste donc faux en permanence, aucune presse accidentelle sans lecture
-    réelle."""
+    la région 'energy'), la ressource vaut 0.0 par défaut --
+    resource_value_above:energy:200 reste donc faux en permanence, aucune
+    presse accidentelle sans lecture réelle."""
     state = CombatState()
-    assert evaluate_condition("energy_above:200", state) is False
-    print("Sans détection, energy_above:200 reste faux -> aucune presse tant que l'Énergie n'est jamais lue (comportement attendu).")
+    assert evaluate_condition("resource_value_above:energy:200", state) is False
+    print("Sans détection, resource_value_above:energy:200 reste faux -> aucune presse tant que l'Énergie n'est jamais lue (comportement attendu).")
 
 
 if __name__ == "__main__":

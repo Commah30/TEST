@@ -725,7 +725,7 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
     importe s'il y en a d'autres en attente. cf. TARIQ_PROC_BUFFS (hooks.py) :
     un simple front montant sur hammer_storm_empowered suffit.
 
-    rage_bar -> state.resources["fury"] (condition YAML : fury_above:N).
+    rage_bar -> state.resources["fury"] (condition YAML : resource_above:fury:N).
     Rempli ANCRÉ À GAUCHE comme hammer_storm_cast_bar, mais contrairement à
     elle ce n'est PAS un minuteur qui ne fait QUE décroître -- une vraie
     ressource de gameplay qui monte et descend (regen/builders vs dépense),
@@ -784,7 +784,7 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
     EN: others pending. cf. TARIQ_PROC_BUFFS (hooks.py): a plain rising edge on
     EN: hammer_storm_empowered suffices.
     EN:
-    EN: rage_bar -> state.resources["fury"] (YAML condition: fury_above:N).
+    EN: rage_bar -> state.resources["fury"] (YAML condition: resource_above:fury:N).
     EN: Filled ANCHORED LEFT like hammer_storm_cast_bar, but unlike it, it's NOT
     EN: a timer that ONLY decreases -- a real gameplay resource that goes up and
     EN: down (regen/builders vs spend), verified frame by frame on a real clip

@@ -263,7 +263,7 @@ CHARACTERS = {
         # required_regions (2026-07-21) : les 3 sont maintenant reellement
         # consommees par make_saryn_state_update_fn -- leur absence
         # degraderait SILENCIEUSEMENT (pas juste "rien ne se passe") : sans
-        # energy, resources["energy"] reste a 0.0 -> energy_above:200 jamais
+        # energy, resources["energy"] reste a 0.0 -> resource_value_above:energy:200 jamais
         # vrai -> AUCUN des deux sorts ne part jamais. Sans toxic_lash/
         # nourish, buffs["X_active"] reste bloque a False (defaut du
         # dataclass) -> not buff:X_active toujours vrai -> le sort partirait
@@ -274,7 +274,7 @@ CHARACTERS = {
         # EN: required_regions (2026-07-21): all 3 are now actually consumed
         # EN: by make_saryn_state_update_fn -- their absence would degrade
         # EN: SILENTLY (not just "nothing happens"): without energy,
-        # EN: resources["energy"] stays at 0.0 -> energy_above:200 never true
+        # EN: resources["energy"] stays at 0.0 -> resource_value_above:energy:200 never true
         # EN: -> NEITHER spell ever fires. Without toxic_lash/nourish,
         # EN: buffs["X_active"] stays stuck at False (the dataclass default)
         # EN: -> not buff:X_active always true -> the spell would fire EVERY

@@ -378,29 +378,46 @@ def parse_sequences(raw_sequences: "list[dict] | None") -> "list[Sequence]":
 #   planner:X          -> state.planner[X] est vrai (posé par le Planner, ex. _update_tariq_planner)
 #   debuff:X           -> state.debuffs[X] est vrai (posé par la détection)
 #   buff:X             -> state.buffs[X] est vrai
-#   resource_full       -> state.resources["primary"] >= 0.999
-#   resource_above:N    -> state.resources["primary"]*100 >= N
-#   fury_above:N        -> state.resources["fury"]*100 >= N
-#   stormfall_above:N   -> state.resources["stormfall"]*100 >= N (Meiko, 2026-07-14 -- entrée des séquences Storm)
-#   earthfall_above:N   -> state.resources["earthfall"]*100 >= N (Meiko, 2026-07-14 -- entrée des séquences Earth)
-#   toughness_above:N   -> state.resources["toughness"]*100 >= N (Helena, 2026-07-18 -- gate Shields Up, cf. config/helena.yaml)
-#   energy_above:N      -> state.resources["energy"] >= N (Saryn/Warframe, 2026-07-20 -- VALEUR ABSOLUE lue en OCR, pas un pourcentage, cf. config/saryn.yaml)
+#   resource_above:<name>:N       -> state.resources[name]*100 >= N (pourcentage 0.0-1.0, ex. barre de remplissage)
+#   resource_value_above:<name>:N -> state.resources[name] >= N (valeur ABSOLUE, ex. lue en OCR -- PAS de *100)
 #   health_below:N / health_above:N
-# EN: Condition evaluation -- tokens separated by commas (AND), prefix "not "
-# EN: for negation.
-# EN:   last:X            -> state.last_cast == X
-# EN:   hooks:X            -> state.hooks[X] is true (set by the pre/post-tick hooks)
-# EN:   planner:X          -> state.planner[X] is true (set by the Planner, e.g. _update_tariq_planner)
-# EN:   debuff:X           -> state.debuffs[X] is true (set by detection)
-# EN:   buff:X             -> state.buffs[X] is true
-# EN:   resource_full       -> state.resources["primary"] >= 0.999
-# EN:   resource_above:N    -> state.resources["primary"]*100 >= N
-# EN:   fury_above:N        -> state.resources["fury"]*100 >= N
-# EN:   stormfall_above:N   -> state.resources["stormfall"]*100 >= N (Meiko, 2026-07-14 -- Storm sequences entry)
-# EN:   earthfall_above:N   -> state.resources["earthfall"]*100 >= N (Meiko, 2026-07-14 -- Earth sequences entry)
-# EN:   toughness_above:N   -> state.resources["toughness"]*100 >= N (Helena, 2026-07-18 -- gates Shields Up, cf. config/helena.yaml)
-# EN:   energy_above:N      -> state.resources["energy"] >= N (Saryn/Warframe, 2026-07-20 -- ABSOLUTE VALUE read via OCR, not a percentage, cf. config/saryn.yaml)
+#
+# GÉNÉRICITÉ DU MOTEUR (2026-07-26) : remplace les anciens tokens fixes
+# fury_above/stormfall_above/earthfall_above/toughness_above (chacun un nom
+# de ressource précis d'UN personnage, codé en dur comme son PROPRE mot-clé
+# elif dans _eval_token) par UN SEUL token paramétré resource_above:<name>:N
+# -- ajouter une ressource pour un futur personnage n'exige plus de modifier
+# engine.py, seulement son YAML. energy_above (Saryn/Warframe) reste un
+# token SÉPARÉ (resource_value_above) plutôt qu'un simple paramètre du même
+# token : Warframe lit l'Énergie en OCR comme une VALEUR ABSOLUE (110,
+# 200...), PAS un pourcentage de remplissage de barre (0.0-1.0, cf.
+# bar_reader.py) comme fury/stormfall/earthfall/toughness -- fusionner les
+# deux sous un seul nom aurait exigé un paramètre supplémentaire (pct/abs)
+# facile à oublier ou inverser par erreur ; deux noms de token distincts
+# rendent l'erreur "j'ai lu une valeur absolue mais utilisé le token
+# pourcentage" impossible à faire sans s'en apercevoir immédiatement (cf.
+# test_saryn.py::test_energy_above_compares_absolute_value_not_percentage,
+# qui protège exactement cette confusion).
+# EN:   resource_above:<name>:N       -> state.resources[name]*100 >= N (0.0-1.0 percentage, e.g. a fill-bar)
+# EN:   resource_value_above:<name>:N -> state.resources[name] >= N (ABSOLUTE value, e.g. read via OCR -- NO *100)
 # EN:   health_below:N / health_above:N
+#
+# EN: ENGINE GENERICITY (2026-07-26): replaces the old fixed tokens
+# EN: fury_above/stormfall_above/earthfall_above/toughness_above (each ONE
+# EN: specific character's resource name, hardcoded as its OWN elif keyword
+# EN: in _eval_token) with a SINGLE parametrized token
+# EN: resource_above:<name>:N -- adding a resource for a future character no
+# EN: longer requires editing engine.py, only its YAML. energy_above
+# EN: (Saryn/Warframe) stays a SEPARATE token (resource_value_above) rather
+# EN: than a parameter of the same token: Warframe reads Energy via OCR as
+# EN: an ABSOLUTE value (110, 200...), NOT a bar-fill percentage (0.0-1.0,
+# EN: cf. bar_reader.py) like fury/stormfall/earthfall/toughness -- merging
+# EN: both under one name would have needed an extra pct/abs parameter easy
+# EN: to forget or flip by mistake; two distinct token names make the
+# EN: "I read an absolute value but used the percentage token" mistake
+# EN: impossible to make without noticing immediately (cf.
+# EN: test_saryn.py::test_energy_above_compares_absolute_value_not_percentage,
+# EN: which guards exactly against this confusion).
 # =============================================================================
 def _eval_token(token: str, state: CombatState) -> bool:
     token = token.strip()
@@ -420,33 +437,20 @@ def _eval_token(token: str, state: CombatState) -> bool:
         result = bool(state.debuffs.get(value, False))
     elif key == "buff":
         result = bool(state.buffs.get(value, False))
-    elif key == "resource_full":
-        result = state.resources.get("primary", 0.0) >= 0.999
     elif key == "resource_above":
-        result = state.resources.get("primary", 0.0) * 100 >= float(value)
-    elif key == "fury_above":
-        result = state.resources.get("fury", 0.0) * 100 >= float(value)
-    elif key == "stormfall_above":
-        result = state.resources.get("stormfall", 0.0) * 100 >= float(value)
-    elif key == "earthfall_above":
-        result = state.resources.get("earthfall", 0.0) * 100 >= float(value)
-    elif key == "toughness_above":
-        result = state.resources.get("toughness", 0.0) * 100 >= float(value)
-    elif key == "energy_above":
-        # Saryn/Warframe (2026-07-20) -- PAS *100 comme les autres tokens
-        # _above : ceux-ci lisent un pourcentage de remplissage de barre
-        # (0.0-1.0, cf. bar_reader.py), l'Énergie Warframe est lue en OCR
-        # (read_digits, wardenbot/ocr.py) comme une VALEUR ABSOLUE (110, 200...)
-        # sur une réserve dont le plafond varie avec les mods -- comparer
-        # directement à la valeur brute, pas à un pourcentage d'un max qui
-        # n'est même pas connu ici.
-        # EN: Saryn/Warframe (2026-07-20) -- NOT *100 like the other _above
-        # EN: tokens: those read a bar-fill percentage (0.0-1.0, cf.
-        # EN: bar_reader.py), Warframe Energy is read via OCR (read_digits,
-        # EN: wardenbot/ocr.py) as an ABSOLUTE VALUE (110, 200...) against a
-        # EN: reserve whose cap varies with mods -- compare directly to the
-        # EN: raw value, not to a percentage of a max that isn't even known here.
-        result = state.resources.get("energy", 0.0) >= float(value)
+        # <name>:<seuil> -- PAS un 2e partition(":") en cascade : name peut
+        # difficilement contenir ":" (c'est une clé de state.resources, donc
+        # un identifiant simple), mais on repart de value (déjà tout ce qui
+        # suit le 1er ":") plutôt que de re-splitter token pour rester
+        # robuste si jamais ça changeait.
+        resource_name, _, threshold = value.partition(":")
+        result = state.resources.get(resource_name, 0.0) * 100 >= float(threshold)
+    elif key == "resource_value_above":
+        # PAS *100 -- cf. docstring du bloc de tokens ci-dessus : réservé aux
+        # ressources lues comme une VALEUR ABSOLUE (OCR, ex. Énergie
+        # Warframe), jamais un pourcentage de remplissage de barre.
+        resource_name, _, threshold = value.partition(":")
+        result = state.resources.get(resource_name, 0.0) >= float(threshold)
     elif key == "health_below":
         result = state.health_pct < float(value)
     elif key == "health_above":

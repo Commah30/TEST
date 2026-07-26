@@ -20,12 +20,12 @@
 #     comme clé lue par load_abilities. La Toughness est exposée comme une
 #     ressource nommée dans state.resources["toughness"] (même mécanisme que
 #     stormfall/earthfall pour Meiko, fury pour Tariq), lue via le token de
-#     condition `toughness_above:N` ajouté dans engine.py::_eval_token
+#     condition `resource_above:toughness:N` ajouté dans engine.py::_eval_token
 #     (2026-07-18) -- PAS un champ YAML.
 #   - `condition: not mana_above:40` (shields_up, spec fournie) : `mana_above`
 #     n'est PAS un token reconnu par _eval_token (aurait levé
 #     `ValueError: Condition inconnue` au premier tick). Corrigé en
-#     `not toughness_above:40`, le token réellement ajouté pour ce personnage.
+#     `not resource_above:toughness:40`, le token réellement ajouté pour ce personnage.
 #   - `burst_sequence:` (siegebreaker/sweeping_strike/shockwave/charge) :
 #     aucune trace de cette clé dans engine.py -- ne correspond pas au bloc
 #     `sequences:` réel (qui décrit des enchaînements PASSIFS déclenchés par
@@ -95,7 +95,7 @@ abilities:
     priorities: {st: 0, aoe: 0}
     off_gcd: true
     cooldown_ms: 1
-    condition: "not toughness_above:40"
+    condition: "not resource_above:toughness:40"
 
   # GCD : Sweeping Strike -- 30s CD fixe, priorité de dégâts la plus haute.
   - name: sweeping_strike

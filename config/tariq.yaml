@@ -245,7 +245,7 @@ abilities:
   # (front montant sur hammer_storm_empowered, cf. tariq_pre_tick) : seulement
   # 14 hammer_storm_proc en jeu réel pour la source de dégâts principale,
   # cohérent avec des procs valides ratés par un 2e check redondant. La
-  # condition (flag:hammer_storm_proc_ready + fury_above:50) est le vrai
+  # condition (flag:hammer_storm_proc_ready + resource_above:fury:50) est le vrai
   # garde-fou désormais, pas l'icône.
   # EN: skip_detection added (2026-07-12): it ALSO depended on a template match
   # EN: on the ability-bar icon -- redundant and risky since we already have a
@@ -253,7 +253,7 @@ abilities:
   # EN: hammer_storm_empowered, cf. tariq_pre_tick): only 14 hammer_storm_proc
   # EN: in a real game for the main damage source, consistent with valid procs
   # EN: missed by a redundant 2nd check. The condition
-  # EN: (flag:hammer_storm_proc_ready + fury_above:50) is the real guardrail
+  # EN: (flag:hammer_storm_proc_ready + resource_above:fury:50) is the real guardrail
   # EN: now, not the icon.
   # BUG TROUVÉ EN JEU (2026-07-13, rapporté par l'utilisateur : "le bot doit presser
   # deux fois pour que le sort parte") : analyse de debug.log (session
@@ -314,7 +314,7 @@ abilities:
     # EN (template): kept for reference -- no longer used for detection
     # EN: (skip_detection:true), only by REGIONS["tariq"]["hammer_storm_stack_badge"]/state-update.
     template: hammer_storm   # gardé pour référence -- plus utilisé pour la détection (skip_detection:true), seulement par REGIONS["tariq"]["hammer_storm_stack_badge"]/état-update
-    condition: fury_above:55, hooks:hammer_storm_proc_ready
+    condition: resource_above:fury:55, hooks:hammer_storm_proc_ready
 
   # BUG TROUVÉ EN JEU (2026-07-12) : priority_st était à égalité avec
   # heavy_strike (3 partout) -- au tie-break par ordre de déclaration
@@ -349,16 +349,16 @@ abilities:
     priorities: {st: 4, cleave: 3, aoe: 3}
     skip_detection: true
     cooldown_ms: 1
-    condition: hooks:skull_crusher_proc_ready, fury_above:23
+    condition: hooks:skull_crusher_proc_ready, resource_above:fury:23
 
   # cooldown_ms:1 était un placeholder -- vrai cooldown confirmé par l'utilisateur :
-  # 5.92s. Condition "not fury_above:76" retirée (2026-07-12) : l'utilisateur a
+  # 5.92s. Condition "not resource_above:fury:76" retirée (2026-07-12) : l'utilisateur a
   # confirmé que c'est un point clé de la rotation qui doit partir à CHAQUE
   # fois que son cooldown se termine, sans condition de fury -- l'ancienne
   # condition la bloquait au-dessus de 76% fury, contrairement à la vraie
   # mécanique.
   # EN: cooldown_ms:1 was a placeholder -- real cooldown confirmed by the user:
-  # EN: 5.92s. Condition "not fury_above:76" removed (2026-07-12): the user
+  # EN: 5.92s. Condition "not resource_above:fury:76" removed (2026-07-12): the user
   # EN: confirmed it's a key rotation point that must fire EVERY time its
   # EN: cooldown ends, with no fury condition -- the old condition blocked it
   # EN: above 76% fury, contrary to the real mechanic.
@@ -400,8 +400,8 @@ abilities:
   # EN: (hammer_storm_proc/skull_crusher_proc) are deliberately NOT affected
   # EN: by this flag -- cf. the full comment in hooks.py.
   #
-  # fury_above:50 -> 30 (2026-07-13, demandé par l'utilisateur) : skull_crusher_proc
-  # (probablement la même dépense sous-jacente) est documenté à fury_above:23
+  # resource_above:fury:50 -> 30 (2026-07-13, demandé par l'utilisateur) : skull_crusher_proc
+  # (probablement la même dépense sous-jacente) est documenté à resource_above:fury:23
   # "coût plein" (cf. hooks.py, SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED)
   # -- 50 semblait surdimensionné par rapport à cette valeur déjà validée
   # ailleurs dans ce fichier. 30 choisi comme marge de sécurité au-dessus de
@@ -409,8 +409,8 @@ abilities:
   # 50->55) plutôt que de descendre directement à 23 sans preuve que cette
   # instance-ci partage exactement le même coût. PAS confirmé par des logs à
   # ce stade -- à valider en jeu comme le seuil de hammer_storm_proc l'a été.
-  # EN: fury_above:50 -> 30 (2026-07-13, requested by the user): skull_crusher_proc
-  # EN: (probably the same underlying cost) is documented at fury_above:23
+  # EN: resource_above:fury:50 -> 30 (2026-07-13, requested by the user): skull_crusher_proc
+  # EN: (probably the same underlying cost) is documented at resource_above:fury:23
   # EN: "full cost" (cf. hooks.py, SKULL_CRUSHER_PROC_FURY_THRESHOLD_DISCOUNTED)
   # EN: -- 50 seemed oversized versus that value already validated elsewhere in
   # EN: this file. 30 chosen as a safety margin above 23 (same spirit as the +5
@@ -423,7 +423,7 @@ abilities:
     skip_detection: true
     cooldown_ms: 1
     gcd_ms: 650
-    condition: fury_above:30, not buff:hammer_storm_empowered, not planner:fury_conserve
+    condition: resource_above:fury:30, not buff:hammer_storm_empowered, not planner:fury_conserve
 
   # cooldown_ms:1 était un placeholder -- vrai cooldown confirmé par l'utilisateur :
   # 4.44s (même valeur que Culling Strike). Contrairement à culling_strike/
@@ -486,7 +486,7 @@ abilities:
   # cast sur 'not debuff:chain_lightning_dim') est retirée -- ici ET dans
   # wardenbot/state_update.py (plus de match du template grisé ni de pose du
   # debuff chain_lightning_dim). La condition ne garde que le gate de Fury
-  # (not fury_above:85), inchangé.
+  # (not resource_above:fury:85), inchangé.
   # EN: NORMAL DETECTION (2026-07-14, the user's choice): chain_lightning returns
   # EN: to standard detection -- it matches its OWN LIT icon (available) and
   # EN: fires on ITS PRESENCE, like any ability in the project (skip_detection
@@ -496,7 +496,7 @@ abilities:
   # EN: 'not debuff:chain_lightning_dim') is removed -- here AND in
   # EN: wardenbot/state_update.py (no more grayed-template match nor setting of
   # EN: the chain_lightning_dim debuff). The condition keeps only the Fury gate
-  # EN: (not fury_above:85), unchanged.
+  # EN: (not resource_above:fury:85), unchanged.
   # cooldown_ms:6100 était une estimation -- vraie valeur confirmée par
   # l'utilisateur : 5.92s.
   # EN: cooldown_ms:6100 was an estimate -- real value confirmed by the user:
@@ -505,7 +505,7 @@ abilities:
     priorities: {st: 7, cleave: 3, aoe: 3}
     cooldown_ms: 5920
     confidence_threshold: 0.65
-    condition: not fury_above:85
+    condition: not resource_above:fury:85
 
   # Condition ajoutée (2026-07-12) : l'utilisateur veut wild_swing comme pur filler
   # -- utilisé seulement quand rien d'autre n'est disponible ET que la rage
@@ -513,20 +513,20 @@ abilities:
   # debug.log AVANT ce fix : 602 presses de wild_swing, dont 71 (12%) à
   # fury=100% pile -- du gaspillage (rien à gagner à builder de la rage déjà
   # au plafond). La priorité la plus basse (8) garantit déjà "rien d'autre
-  # disponible" ; not fury_above:90 ajoute la 2e condition "rage basse".
+  # disponible" ; not resource_above:fury:90 ajoute la 2e condition "rage basse".
   # EN: Condition added (2026-07-12): the user wants wild_swing as a pure filler
   # EN: -- used only when nothing else is available AND rage is low, not when
   # EN: it's already full/near the cap. Confirmed in debug.log BEFORE this fix:
   # EN: 602 wild_swing presses, of which 71 (12%) at exactly fury=100% --
   # EN: waste (nothing to gain building rage already at the ceiling). The
   # EN: lowest priority (8) already guarantees "nothing else available"; not
-  # EN: fury_above:90 adds the 2nd condition "low rage".
+  # EN: resource_above:fury:90 adds the 2nd condition "low rage".
   - name: wild_swing
     priorities: {st: 8, cleave: 7, aoe: 7}
     cooldown_ms: 1
     skip_detection: true
     blind_sweep: true
-    condition: not fury_above:90
+    condition: not resource_above:fury:90
 
 burst_sequence:
   - focused_wrath
