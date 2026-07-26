@@ -616,7 +616,7 @@ class RotationEngine:
         pre_tick_hook: Optional[Callable[[CombatState], list[Intent]]] = None,
         post_tick_hook: Optional[Callable[[CombatState, str], None]] = None,
         state_update_fn: Optional[Callable[[CombatState], None]] = None,
-        off_gcd_hook_abilities: frozenset = frozenset({"fighting_techniques"}),
+        off_gcd_hook_abilities: frozenset = frozenset(),
         sequences: "Optional[list[Sequence]]" = None,
         telemetry: Optional[TelemetryWorker] = None,
         weight_overrides: "Optional[dict[str, float]]" = None,
@@ -652,6 +652,12 @@ class RotationEngine:
             le hook pose un GCD normal, comme une ability classique. Sert
             AUSSI au Sequence Tracker (cf. Sequence plus haut) : un step dont
             l'ability figure ici ne bloque pas non plus sur le GCD.
+            Défaut frozenset() VIDE (2026-07-26, généricité du moteur -- ne
+            plus assumer un nom d'ability réel d'un personnage précis dans le
+            core) : chaque personnage doit désormais le préciser explicitement
+            (cf. game_config.py::CHARACTERS["meiko"], qui passe
+            frozenset({"fighting_techniques"}) -- comportement RÉEL identique
+            à avant, juste rendu explicite plutôt qu'implicite dans le moteur).
         sequences (2026-07-14, Phase 3) : liste de Sequence (cf. plus haut,
             engine.py::parse_sequences) -- None/liste vide (défaut) = AUCUN
             changement de comportement, exactement comme avant leur
@@ -689,6 +695,13 @@ class RotationEngine:
         EN:     hook sets a normal GCD, like a regular ability. ALSO used by the
         EN:     Sequence Tracker (cf. Sequence above): a step whose ability is
         EN:     listed here doesn't block on the GCD either.
+        EN:     Defaults to an EMPTY frozenset() (2026-07-26, engine genericity
+        EN:     -- the core should no longer assume a real ability name from one
+        EN:     specific character): each character must now state it
+        EN:     explicitly (cf. game_config.py::CHARACTERS["meiko"], which
+        EN:     passes frozenset({"fighting_techniques"}) -- REAL behavior
+        EN:     identical to before, just made explicit rather than implicit in
+        EN:     the engine).
         EN: sequences (2026-07-14, Phase 3): list of Sequence (cf. above,
         EN:     engine.py::parse_sequences) -- None/empty list (default) = NO
         EN:     behavior change, exactly like before their introduction.

@@ -86,6 +86,14 @@ CHARACTERS = {
         # les régions, juste celles dont l'absence casserait une décision
         # centrale plutôt qu'un simple raffinement.
         "required_regions": ["buff_bar"],
+        # AJOUTÉ EXPLICITEMENT (2026-07-26, généricité du moteur) : le moteur
+        # (wardenbot/engine.py::RotationEngine) ne défaute plus sur
+        # "fighting_techniques" -- son défaut est désormais frozenset() vide,
+        # pour ne plus assumer un nom d'ability réel d'un personnage précis
+        # dans le core. Comportement RÉEL identique à avant (fighting_techniques
+        # est le finisher off-GCD de Meiko), juste rendu explicite ici plutôt
+        # qu'implicite dans engine.py.
+        "off_gcd_hook_abilities": frozenset({"fighting_techniques"}),
     },
     "tariq": {
         "config": "config/tariq.yaml",
