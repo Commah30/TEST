@@ -484,8 +484,8 @@ def test_detection_exception_on_one_ability_does_not_freeze_the_scan():
     tuait tout le tick, empêchant les abilities de priorité INFÉRIEURE
     (wild_swing) de jamais partir. Vérifie que le scan saute l'ability qui
     lève et continue -- la rotation ne gèle plus sur un hoquet de capture."""
-    detector = Ability(name="detector", priority_st=1, skip_detection=False)   # déclenche is_ready_fn
-    filler = Ability(name="filler", priority_st=2, skip_detection=True)         # priorité inférieure, aucune détection
+    detector = Ability(name="detector", priorities={"st": 1}, skip_detection=False)   # déclenche is_ready_fn
+    filler = Ability(name="filler", priorities={"st": 2}, skip_detection=True)         # priorité inférieure, aucune détection
 
     def is_ready_fn_that_throws(name, threshold=None):
         raise RuntimeError("BitBlt (capture simulée qui hoquette)")
@@ -535,11 +535,11 @@ def test_engine_tick_prefers_hook_intent_over_scan_intent_by_weight():
     """Le coeur de la migration Intent (2026-07-14) : RotationEngine.tick()
     doit choisir l'Intent au poids le plus élevé plutôt que de laisser le
     hook gagner par court-circuit codé en dur. Une ability de priorité YAML
-    maximale (priority_st=0) doit quand même perdre face à un hook qui
+    maximale (priorities={"st": 0}) doit quand même perdre face à un hook qui
     propose autre chose, puisque son poids (90) dépasse le poids de base du
     scan (50)."""
-    yaml_winner = Ability(name="yaml_winner", priority_st=0, skip_detection=True, cooldown_ms=0)
-    hook_winner = Ability(name="hook_winner", priority_st=99, skip_detection=True, cooldown_ms=0)
+    yaml_winner = Ability(name="yaml_winner", priorities={"st": 0}, skip_detection=True, cooldown_ms=0)
+    hook_winner = Ability(name="hook_winner", priorities={"st": 99}, skip_detection=True, cooldown_ms=0)
 
     def fake_pre_tick_hook(state):
         return [Intent(ability="hook_winner", weight=90, source="test_hook")]
@@ -737,7 +737,7 @@ def test_weight_overrides_can_let_scan_win_over_a_weakened_sequence():
         condition="last:opener",
         steps=[SequenceStep(ability="sequence_ability")],
     )
-    scan_winner = Ability(name="scan_ability", priority_st=0, skip_detection=True, cooldown_ms=0)
+    scan_winner = Ability(name="scan_ability", priorities={"st": 0}, skip_detection=True, cooldown_ms=0)
 
     pressed_names: list[str] = []
     state = CombatState(mode="st")
@@ -769,7 +769,7 @@ def test_weight_overrides_never_let_scan_beat_a_weakened_hook():
     def hook(state):
         return [Intent(ability="hook_ability", weight=90, source="test_hook")]
 
-    scan_winner = Ability(name="scan_ability", priority_st=0, skip_detection=True, cooldown_ms=0)
+    scan_winner = Ability(name="scan_ability", priorities={"st": 0}, skip_detection=True, cooldown_ms=0)
 
     pressed_names: list[str] = []
     engine = RotationEngine(
@@ -800,7 +800,7 @@ def test_telemetry_logs_only_when_something_is_pressed():
         worker = TelemetryWorker(log_file=log_path)
         worker.start()
 
-        idle_ability = Ability(name="idle", priority_st=0, cooldown_ms=999999, skip_detection=True)
+        idle_ability = Ability(name="idle", priorities={"st": 0}, cooldown_ms=999999, skip_detection=True)
         state = CombatState(mode="st")
         state.cooldown_until["idle"] = time.monotonic() + 999.0   # jamais prêt -> aucune presse possible
         engine = RotationEngine(

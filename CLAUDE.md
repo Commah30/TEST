@@ -112,8 +112,10 @@ mécanique Meiko d'origine du projet.
 #### `wardenbot/engine.py`
 - `State` : last_cast, last_cast_time, cast_history, cooldown_until,
   gcd_until, flags, debuffs, buffs, resources, health_pct, mode ("st"/"aoe").
-- `Ability` : name, priority_st/priority_aoe, condition, cooldown_ms,
-  off_gcd, skip_detection, requires_ready, template.
+- `Ability` : name, priorities (dict {mode: N}, 2026-07-26, généricité du
+  moteur -- remplace les anciens champs fixes priority_st/priority_aoe/
+  priority_cleave), condition, cooldown_ms, off_gcd, skip_detection,
+  requires_ready, template.
 - `RotationEngine.tick()` : appelle `state_update_fn` (lecture écran) →
   `pre_tick_hook` (peut court-circuiter le scan normal) → sinon scan de
   priorité normal → `post_tick_hook`.
@@ -304,8 +306,10 @@ mechanics.
 #### `wardenbot/engine.py`
 - `State`: last_cast, last_cast_time, cast_history, cooldown_until, gcd_until,
   flags, debuffs, buffs, resources, health_pct, mode ("st"/"aoe").
-- `Ability`: name, priority_st/priority_aoe, condition, cooldown_ms, off_gcd,
-  skip_detection, requires_ready, template.
+- `Ability`: name, priorities (dict {mode: N}, 2026-07-26, engine genericity
+  -- replaces the old fixed priority_st/priority_aoe/priority_cleave
+  fields), condition, cooldown_ms, off_gcd, skip_detection, requires_ready,
+  template.
 - `RotationEngine.tick()`: calls `state_update_fn` (screen read) →
   `pre_tick_hook` (can short-circuit the normal scan) → otherwise the normal
   priority scan → `post_tick_hook`.

@@ -357,11 +357,11 @@ def test_priority_cleave_is_a_distinct_mode_from_st_and_aoe():
     """Schism V2.yaml donne des priorités différentes par mode (ex.
     chain_lightning : st=6, cleave=3, aoe=3) -- le mode 'cleave' doit être
     un troisième mode à part entière, pas un alias de 'st' ou 'aoe'."""
-    ab = Ability(name="chain_lightning", priority_st=6, priority_cleave=3, priority_aoe=3)
+    ab = Ability(name="chain_lightning", priorities={"st": 6, "cleave": 3, "aoe": 3})
     assert ab.priority("st") == 6
     assert ab.priority("cleave") == 3
     assert ab.priority("aoe") == 3
-    print("priority_cleave distinct de priority_st/priority_aoe : OK")
+    print("priorities['cleave'] distinct de priorities['st']/priorities['aoe'] : OK")
 
 
 def test_condition_per_mode_falls_back_to_generic_condition():
@@ -371,9 +371,11 @@ def test_condition_per_mode_falls_back_to_generic_condition():
     pour une ability qui n'a que ce champ générique (ex. hammer_storm_proc)."""
     focused_wrath = Ability(
         name="focused_wrath",
-        condition_st="buff:skull_crusher_empowered",
-        condition_cleave="buff:hammer_storm_empowered",
-        condition_aoe="buff:hammer_storm_empowered",
+        conditions={
+            "st": "buff:skull_crusher_empowered",
+            "cleave": "buff:hammer_storm_empowered",
+            "aoe": "buff:hammer_storm_empowered",
+        },
     )
     assert focused_wrath.condition_for("st") == "buff:skull_crusher_empowered"
     assert focused_wrath.condition_for("cleave") == "buff:hammer_storm_empowered"
@@ -466,7 +468,7 @@ def test_hard_lock_blocks_even_off_gcd_abilities():
     state = CombatState()
     state.hard_lock_until = time.monotonic() + 10.0  # verrouillé loin dans le futur
 
-    ability = Ability(name="culling_strike", priority_st=0, off_gcd=True, skip_detection=True)
+    ability = Ability(name="culling_strike", priorities={"st": 0}, off_gcd=True, skip_detection=True)
     engine = RotationEngine(
         abilities=[ability],
         state=state,
@@ -494,8 +496,8 @@ def test_hammer_storm_proc_fires_on_any_single_proc():
     state.debuffs["culling_strike_dim"] = True  # cible pas sous 35% PV -> indisponible
     state.cooldown_until["thunder_call"] = time.monotonic() + 999.0  # déjà utilisée récemment (cooldown 43s)
     state.cooldown_until["focused_wrath"] = time.monotonic() + 999.0  # déjà utilisée récemment (cooldown 86s)
-    # heavy_strike (priority_st:3) gagne désormais sans ambiguïté sur
-    # hammer_storm_proc (priority_st:4 depuis 2026-07-15, cf. config/tariq.yaml)
+    # heavy_strike (priorities.st=3) gagne désormais sans ambiguïté sur
+    # hammer_storm_proc (priorities.st=4 depuis 2026-07-15, cf. config/tariq.yaml)
     # -- gaté ici comme les 3 autres ci-dessus pour isoler ce que ce test
     # vérifie vraiment (hammer_storm_proc part sans focused_wrath_empowered),
     # sans dépendre de l'arbitrage heavy_strike/hammer_storm_proc lui-même.
@@ -763,16 +765,17 @@ def test_hammer_storm_proc_press_with_real_cast_confirms_consumption():
 
 def test_heavy_strike_outranks_skull_crusher_proc_in_priority():
     """BUG TROUVÉ EN JEU (2026-07-12, debug.log) : heavy_strike et
-    skull_crusher_proc étaient à égalité de priority_st (3) -- au tie-break
-    par ordre de déclaration, skull_crusher_proc (déclarée avant dans le
-    YAML) gagnait systématiquement, retardant heavy_strike bien au-delà de
-    la fin de son propre cooldown alors que l'utilisateur a dit que c'est un point
-    clé de la rotation. Vérifie que la vraie config/tariq.yaml a bien
-    heavy_strike strictement prioritaire désormais."""
+    skull_crusher_proc étaient à égalité de priorities["st"] (3) -- au
+    tie-break par ordre de déclaration, skull_crusher_proc (déclarée avant
+    dans le YAML) gagnait systématiquement, retardant heavy_strike bien
+    au-delà de la fin de son propre cooldown alors que l'utilisateur a dit
+    que c'est un point clé de la rotation. Vérifie que la vraie
+    config/tariq.yaml a bien heavy_strike strictement prioritaire
+    désormais."""
     abilities, meta = load_abilities("config/tariq.yaml")
     by_name = {a.name: a for a in abilities}
-    assert by_name["heavy_strike"].priority_st < by_name["skull_crusher_proc"].priority_st
-    print("heavy_strike a bien une priority_st strictement inférieure (= prioritaire) à skull_crusher_proc.")
+    assert by_name["heavy_strike"].priority("st") < by_name["skull_crusher_proc"].priority("st")
+    print("heavy_strike a bien une priorité 'st' strictement inférieure (= prioritaire) à skull_crusher_proc.")
 
 
 def test_planner_stays_normal_when_no_burst_window_imminent():
@@ -1036,8 +1039,8 @@ def test_debug_choice_reason_explains_why_the_winner_beat_the_runner_up():
     state.debuffs["culling_strike_dim"] = True
     state.cooldown_until["thunder_call"] = time.monotonic() + 999.0
     state.cooldown_until["focused_wrath"] = time.monotonic() + 999.0
-    # heavy_strike (priority_st:3) gagne désormais sur hammer_storm_proc
-    # (priority_st:4 depuis 2026-07-15) -- gaté pour isoler ce que ce test
+    # heavy_strike (priorities.st=3) gagne désormais sur hammer_storm_proc
+    # (priorities.st=4 depuis 2026-07-15) -- gaté pour isoler ce que ce test
     # vérifie (le contenu de debug_choice_reason), cf. même fix dans
     # test_hammer_storm_proc_fires_on_any_single_proc ci-dessus.
     state.cooldown_until["heavy_strike"] = time.monotonic() + 999.0

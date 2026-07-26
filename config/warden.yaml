@@ -30,23 +30,20 @@ gcd_ms: 1100
 
 abilities:
   - name: stone_shield
-    priority_st: 0
-    priority_aoe: 0
+    priorities: {st: 0, aoe: 0}
     off_gcd: true
     condition: "hooks:need_shield"
     cooldown_ms: 1
     skip_detection: true
 
   - name: shatter_earth
-    priority_st: 1
-    priority_aoe: 1
+    priorities: {st: 1, aoe: 1}
     cooldown_ms: 60000
 
   # ST (1-2 cibles) : Earth Fist en premier -> Rising Earth / Earthfist Barrage
   # EN: ST (1-2 targets): Earth Fist first -> Rising Earth / Earthfist Barrage
   - name: earth_fist
-    priority_st: 2
-    priority_aoe: 4
+    priorities: {st: 2, aoe: 4}
     cooldown_ms: 1
     skip_detection: true
 
@@ -55,14 +52,12 @@ abilities:
   # EN: AoE (3+ targets): Wind Kick first -> Rising Storm / Lashing Stormkick
   # EN: (this is the combo that stacks Warden of the Temple)
   - name: wind_kick
-    priority_st: 4
-    priority_aoe: 2
+    priorities: {st: 4, aoe: 2}
     cooldown_ms: 1
     skip_detection: true
 
   - name: serenity
-    priority_st: 10
-    priority_aoe: 10
+    priorities: {st: 10, aoe: 10}
     off_gcd: true
     cooldown_ms: 10000
     condition: "health_below:60"

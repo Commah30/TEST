@@ -92,29 +92,25 @@ abilities:
   # pas par ce cooldown fictif. Condition : sous 40% Toughness (cf. gap de
   # détection documenté en tête de fichier).
   - name: shields_up
-    priority_st: 0
-    priority_aoe: 0
+    priorities: {st: 0, aoe: 0}
     off_gcd: true
     cooldown_ms: 1
     condition: "not toughness_above:40"
 
   # GCD : Sweeping Strike -- 30s CD fixe, priorité de dégâts la plus haute.
   - name: sweeping_strike
-    priority_st: 1
-    priority_aoe: 1
+    priorities: {st: 1, aoe: 1}
     cooldown_ms: 30000
 
   # GCD : Shockwave -- 29.87s CD réel (mesuré par l'utilisateur, 2026-07-19),
   # fortement réduit par la chaîne CDR (Shield Slam/Shield Throw -3s chacun).
   - name: shockwave
-    priority_st: 2
-    priority_aoe: 2
+    priorities: {st: 2, aoe: 2}
     cooldown_ms: 29870
 
   # GCD : Shield Slam -- 2 charges/7.5s recharge (Haste = CDR), charge-based.
   - name: shield_slam
-    priority_st: 3
-    priority_aoe: 3
+    priorities: {st: 3, aoe: 3}
     cooldown_ms: 1
 
   # GCD : Shield Throw (PROC) -- version empowered/glowy (block-reset), gratuite
@@ -125,8 +121,7 @@ abilities:
   # helena_buff_bar), pas l'icône de la barre de sorts. Partage la même touche
   # que shield_throw (cf. profiles/*/config.json).
   - name: shield_throw_proc
-    priority_st: 4
-    priority_aoe: 4
+    priorities: {st: 4, aoe: 4}
     skip_detection: true
     cooldown_ms: 1
     condition: "hooks:shield_throw_proc_ready"
@@ -135,30 +130,26 @@ abilities:
   # Shockwave. AUTO-CASTÉE depuis le 2026-07-19 (demande explicite de
   # l'utilisateur -- la spec d'origine la laissait manuelle, cf. tête de fichier).
   - name: shield_throw
-    priority_st: 5
-    priority_aoe: 5
+    priorities: {st: 5, aoe: 5}
     cooldown_ms: 21000
 
   # Off-GCD : Hold the Line -- RESET COMPLET du cooldown de Shield Slam (pas
   # une réduction partielle, cf. helena_post_tick) + empower absorb. 30s CD
   # réel (donné par l'utilisateur, 2026-07-19).
   - name: hold_the_line
-    priority_st: 6
-    priority_aoe: 6
+    priorities: {st: 6, aoe: 6}
     off_gcd: true
     cooldown_ms: 30000
 
   # GCD : Power Strike -- 6s CD, CDR pour Shield Slam ET Shield Throw.
   - name: power_strike
-    priority_st: 7
-    priority_aoe: 7
+    priorities: {st: 7, aoe: 7}
     cooldown_ms: 6000
 
   # GCD : Measured Strike -- filler sans CD réel, dernier recours.
   # skip_detection:true : pas besoin de template, toujours pressable si rien
   # d'autre n'est prêt (même convention que measured_strike côté spec fournie).
   - name: measured_strike
-    priority_st: 8
-    priority_aoe: 8
+    priorities: {st: 8, aoe: 8}
     cooldown_ms: 1500
     skip_detection: true

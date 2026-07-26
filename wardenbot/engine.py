@@ -1,7 +1,7 @@
 """
 engine.py — coeur du moteur de rotation.
 
-Reprend un dialecte YAML custom (name, priority_st/priority_aoe, condition,
+Reprend un dialecte YAML custom (name, priorities, condition,
 cooldown_ms, off_gcd, skip_detection, requires_ready) pour que Warden.yaml
 soit réutilisable quasi tel quel.
 
@@ -13,7 +13,7 @@ pense que le hook fait ça".
 
 EN: engine.py — core of the rotation engine.
 EN:
-EN: It uses a custom YAML dialect (name, priority_st/priority_aoe, condition,
+EN: It uses a custom YAML dialect (name, priorities, condition,
 EN: cooldown_ms, off_gcd, skip_detection, requires_ready) so that Warden.yaml
 EN: is reusable almost as-is.
 EN:
@@ -215,13 +215,27 @@ class CombatState:
 @dataclass
 class Ability:
     name: str
-    priority_st: int = 99
-    priority_aoe: int = 99
-    priority_cleave: int = 99
+    # priorities/conditions : dict {mode: valeur}, PAS des champs fixes
+    # priority_st/priority_aoe/priority_cleave (2026-07-26, généricité du
+    # moteur) -- avant ça, exactement 3 noms de mode ("st"/"aoe"/"cleave")
+    # étaient codés en dur dans le SCHÉMA de cette dataclass : ajouter un 4e
+    # mode exigeait de modifier engine.py, pas juste le YAML. `priorities`
+    # accepte désormais N'IMPORTE QUEL nom de mode librement défini dans le
+    # YAML (cf. priority()/condition_for() ci-dessous) -- un mode absent du
+    # dict retombe sur 99 (jamais prioritaire) plutôt que de lever une
+    # KeyError, même comportement que l'ancien défaut par champ.
+    # EN: priorities/conditions: dict {mode: value}, NOT fixed
+    # EN: priority_st/priority_aoe/priority_cleave fields (2026-07-26, engine
+    # EN: genericity) -- before this, exactly 3 mode names
+    # EN: ("st"/"aoe"/"cleave") were hardcoded into this dataclass's SCHEMA:
+    # EN: adding a 4th mode required editing engine.py, not just the YAML.
+    # EN: `priorities` now accepts ANY mode name freely defined in the YAML
+    # EN: (cf. priority()/condition_for() below) -- a mode absent from the
+    # EN: dict falls back to 99 (never priority) rather than raising
+    # EN: KeyError, same behavior as the old per-field default.
+    priorities: dict = field(default_factory=dict)
     condition: str = ""
-    condition_st: str = ""       # si non-vide, prime sur `condition` en mode "st" · EN: if non-empty, overrides `condition` in "st" mode
-    condition_cleave: str = ""   # idem en mode "cleave" · EN: same in "cleave" mode
-    condition_aoe: str = ""      # idem en mode "aoe" · EN: same in "aoe" mode
+    conditions: dict = field(default_factory=dict)  # {mode: condition}, prime sur `condition` si présent pour ce mode · EN: {mode: condition}, overrides `condition` if present for that mode
     cooldown_ms: int = 0
     off_gcd: bool = False
     skip_detection: bool = False
@@ -241,13 +255,10 @@ class Ability:
     blind_sweep: bool = False      # censé bypasser un gate "cible requise" -- ce gate n'existe pas encore dans le moteur, donc champ inerte pour l'instant · EN: meant to bypass a "target required" gate -- that gate doesn't exist in the engine yet, so this field is inert for now
 
     def priority(self, mode: str) -> int:
-        if mode == "cleave":
-            return self.priority_cleave
-        return self.priority_aoe if mode == "aoe" else self.priority_st
+        return self.priorities.get(mode, 99)
 
     def condition_for(self, mode: str) -> str:
-        per_mode = {"st": self.condition_st, "cleave": self.condition_cleave, "aoe": self.condition_aoe}
-        return per_mode.get(mode, "") or self.condition
+        return self.conditions.get(mode, "") or self.condition
 
     def template_name(self) -> str:
         return self.template or self.name

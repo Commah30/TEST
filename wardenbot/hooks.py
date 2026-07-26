@@ -2050,7 +2050,7 @@ def vigour_post_tick_early_game(state: CombatState, pressed: str) -> None:
 # uniquement pour le front montant de shield_throw_proc (bookkeeping pur, ne
 # presse jamais rien lui-même -- cf. helena_pre_tick, retourne toujours []).
 # Le reste de la rotation Season 3 continue de s'exprimer entièrement via le
-# scan de priorité YAML (priority_st/priority_aoe/condition).
+# scan de priorité YAML (priorities/condition).
 #
 # EN: HELENA (Guardian tank) -- 2026-07-18/19. cf. config/helena.yaml for the
 # EN: detail of captures/mappings still missing before this runs perfectly
@@ -2058,7 +2058,7 @@ def vigour_post_tick_early_game(state: CombatState, pressed: str) -> None:
 # EN: only for shield_throw_proc's rising edge (pure bookkeeping, never
 # EN: presses anything itself -- cf. helena_pre_tick, always returns []). The
 # EN: rest of the Season 3 rotation still expresses entirely through the YAML
-# EN: priority scan (priority_st/priority_aoe/condition).
+# EN: priority scan (priorities/condition).
 # =============================================================================
 
 # Front montant de shield_throw_proc -- MÊME schéma que TARIQ_PROC_BUFFS/

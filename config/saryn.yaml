@@ -71,8 +71,7 @@ abilities:
   # Touche 3 : Toxic Lash -- recast si le buff est retombé (décompte
   # absent/à 0, cf. state.buffs["toxic_lash_active"]) ET Énergie >= 200.
   - name: toxic_lash
-    priority_st: 0
-    priority_aoe: 0
+    priorities: {st: 0, aoe: 0}
     off_gcd: true
     skip_detection: true
     cooldown_ms: 2000
@@ -80,8 +79,7 @@ abilities:
 
   # Touche 4 : Nourish (Helminth) -- même logique, décompte propre (20.62s).
   - name: nourish
-    priority_st: 1
-    priority_aoe: 1
+    priorities: {st: 1, aoe: 1}
     off_gcd: true
     skip_detection: true
     cooldown_ms: 2000

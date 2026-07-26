@@ -117,9 +117,7 @@ abilities:
   # EN: condition restored as-is, no net change on this ability for now for
   # EN: lack of a better source for HIS specific build (no bands).
   - name: culling_strike
-    priority_st: 0
-    priority_cleave: 0
-    priority_aoe: 0
+    priorities: {st: 0, cleave: 0, aoe: 0}
     off_gcd: true
     skip_detection: true
     cooldown_ms: 4440
@@ -178,9 +176,7 @@ abilities:
   # EN: was template detection, not the sync. Cooldown (86s) already confirmed
   # EN: by the user -- a sufficient guardrail on its own.
   - name: focused_wrath
-    priority_st: 0
-    priority_cleave: 0
-    priority_aoe: 0
+    priorities: {st: 0, cleave: 0, aoe: 0}
     off_gcd: true
     skip_detection: true
     cooldown_ms: 86000
@@ -214,9 +210,7 @@ abilities:
   # EN: analogy (same structure, same absence of skip_detection until now) --
   # EN: cooldown (43s) already confirmed by the user, sufficient as a guardrail.
   - name: thunder_call
-    priority_st: 0
-    priority_cleave: 0
-    priority_aoe: 0
+    priorities: {st: 0, cleave: 0, aoe: 0}
     off_gcd: true
     skip_detection: true
     cooldown_ms: 43000
@@ -290,7 +284,7 @@ abilities:
   - name: hammer_storm_proc
     # priority_st/cleave/aoe descendus de 2 à 4 (2026-07-15, demandé par
     # l'utilisateur) : même principe déjà appliqué à skull_crusher_proc plus bas
-    # (descendue de 3 à 4 le 2026-07-12) -- heavy_strike (priority_st:3) doit
+    # (descendue de 3 à 4 le 2026-07-12) -- heavy_strike (priorities.st=3) doit
     # gagner sans ambiguïté à chaque fois que son propre cooldown est fini,
     # point clé de la rotation déjà établi. Sans off_gcd, hammer_storm_proc
     # partage le même GCD que heavy_strike : en cas d'égalité de tick, le
@@ -300,7 +294,7 @@ abilities:
     # d'un cran quand les deux tombent pile au même tick.
     # EN: priority_st/cleave/aoe lowered from 2 to 4 (2026-07-15, requested by
     # EN: the user): same principle already applied to skull_crusher_proc below
-    # EN: (lowered from 3 to 4 on 2026-07-12) -- heavy_strike (priority_st:3)
+    # EN: (lowered from 3 to 4 on 2026-07-12) -- heavy_strike (priorities.st=3)
     # EN: must win unambiguously every time its own cooldown is over, an
     # EN: already-established key rotation point. Without off_gcd,
     # EN: hammer_storm_proc shares the same GCD as heavy_strike: on a tick tie,
@@ -308,9 +302,7 @@ abilities:
     # EN: hammer_storm_proc_ready never clears on its own over time (rising
     # EN: edge, cf. hooks.py) -- so no proc lost, just delayed by one step when
     # EN: both land on the exact same tick.
-    priority_st: 4
-    priority_cleave: 4
-    priority_aoe: 4
+    priorities: {st: 4, cleave: 4, aoe: 4}
     # EN (cooldown_ms:1): requested by the user (2026-07-12) -- the real
     # EN: anti-double-cast guardrail is the rising edge + rearm on stack
     # EN: increase (hooks.py), not this cooldown; a higher cooldown_ms only
@@ -354,9 +346,7 @@ abilities:
   # EN: steals heavy_strike's scan slot) already fixed the observed symptom
   # EN: (double press 1s apart, 14:04:08/14:04:09).
   - name: skull_crusher_proc
-    priority_st: 4
-    priority_cleave: 3
-    priority_aoe: 3
+    priorities: {st: 4, cleave: 3, aoe: 3}
     skip_detection: true
     cooldown_ms: 1
     condition: hooks:skull_crusher_proc_ready, fury_above:23
@@ -387,9 +377,7 @@ abilities:
   # EN: a guardrail, no more dependence on visual-detection reliability for an
   # EN: ability that MUST always fire.
   - name: heavy_strike
-    priority_st: 3
-    priority_cleave: 3
-    priority_aoe: 3
+    priorities: {st: 3, cleave: 3, aoe: 3}
     cooldown_ms: 5920
     skip_detection: true
 
@@ -431,9 +419,7 @@ abilities:
   # EN: same cost. NOT confirmed by logs at this stage -- to validate in-game
   # EN: like the hammer_storm_proc threshold was.
   - name: skull_crusher
-    priority_st: 5
-    priority_cleave: 4
-    priority_aoe: 4
+    priorities: {st: 5, cleave: 4, aoe: 4}
     skip_detection: true
     cooldown_ms: 1
     gcd_ms: 650
@@ -487,9 +473,7 @@ abilities:
   # EN: screen capture on the decision thread (the point the user raised), all
   # EN: the heavy detection stays confined to the dedicated detection thread.
   - name: face_breaker
-    priority_st: 6
-    priority_cleave: 5
-    priority_aoe: 5
+    priorities: {st: 6, cleave: 5, aoe: 5}
     cooldown_ms: 4440
     skip_detection: true
 
@@ -518,9 +502,7 @@ abilities:
   # EN: cooldown_ms:6100 was an estimate -- real value confirmed by the user:
   # EN: 5.92s.
   - name: chain_lightning
-    priority_st: 7
-    priority_cleave: 3
-    priority_aoe: 3
+    priorities: {st: 7, cleave: 3, aoe: 3}
     cooldown_ms: 5920
     confidence_threshold: 0.65
     condition: not fury_above:85
@@ -540,9 +522,7 @@ abilities:
   # EN: lowest priority (8) already guarantees "nothing else available"; not
   # EN: fury_above:90 adds the 2nd condition "low rage".
   - name: wild_swing
-    priority_st: 8
-    priority_cleave: 7
-    priority_aoe: 7
+    priorities: {st: 8, cleave: 7, aoe: 7}
     cooldown_ms: 1
     skip_detection: true
     blind_sweep: true

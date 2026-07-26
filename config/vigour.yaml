@@ -101,48 +101,48 @@ gcd_ms: 1100   # laissé volontairement à cette valeur (choix explicite de l'ut
 
 abilities:
   - name: greater_heal
-    priority_st: 1
+    priorities: {st: 1}
     skip_detection: true
     cooldown_ms: 0
 
   - name: circle_of_light
-    priority_st: 2
+    priorities: {st: 2}
     skip_detection: true
     cooldown_ms: 14950
 
   - name: remove_magic
-    priority_st: 3
+    priorities: {st: 3}
     skip_detection: true
     cooldown_ms: 6000
 
   - name: rune_of_renewal
-    priority_st: 4
+    priorities: {st: 4}
     skip_detection: true
     cooldown_ms: 0
 
   - name: dawnbreaker_orb
-    priority_st: 5
+    priorities: {st: 5}
     skip_detection: true
     cooldown_ms: 9970
 
   - name: luminous_barrier
-    priority_st: 6
+    priorities: {st: 6}
     skip_detection: true
     cooldown_ms: 19940
 
   - name: dawnflare
-    priority_st: 7
+    priorities: {st: 7}
     skip_detection: true
     cooldown_ms: 0
 
   # Déclarées mais PAS câblées dans hooks.py::vigour_pre_tick -- cf. commentaire
   # de tête pour la raison précise de chacune.
   - name: radiant_blast
-    priority_st: 8
+    priorities: {st: 8}
     skip_detection: true
     cooldown_ms: 9970
 
   - name: soulbrand
-    priority_st: 9
+    priorities: {st: 9}
     skip_detection: true
     cooldown_ms: 0
