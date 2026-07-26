@@ -28,7 +28,7 @@ from wardenbot.diagnostics import CAPTURE_WATCHDOG_THRESHOLD_S, log_error, log_p
 from wardenbot.engine import CombatState
 from wardenbot.freshness import DetectionMeta, FreshnessPolicy
 from wardenbot.matcher import TemplateMatcher
-from wardenbot.ocr import read_countdown_seconds
+from wardenbot.ocr import read_countdown_seconds, read_digits
 from wardenbot.yolo_detect import MEIKO_YOLO_WEIGHTS_PATH, detect, detect_with_boxes, get_last_predict_speed_ms
 
 # =============================================================================
@@ -324,6 +324,29 @@ def make_meiko_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
         if snap.ocr_created_at is not None:
             state.detection_meta["meiko_ocr"] = DetectionMeta(created_at=snap.ocr_created_at)
 
+    # FUITE CONFIRMÉE (audit architecture, 2026-07-18) : stop_event était créé
+    # ici puis jamais exposé à l'appelant -- build_engine (main.py) n'avait
+    # donc AUCUN moyen d'arrêter ce thread, qui tournait indéfiniment même
+    # après un changement de personnage (cf. app.py::BotController.
+    # set_profile, "l'ancien engine et ses threads de détection/input restent
+    # en veille"). Attaché comme attribut sur la closure plutôt que de changer
+    # le type de retour (list[Ability] tuple, etc. -- build_engine appelle ces
+    # 3 factories (Meiko/Tariq/Vigour) génériquement et n'attend qu'un
+    # callable) : un getattr(state_update_fn, "stop_event", None) suffit côté
+    # appelant, sans casser Vigour (synchrone, aucun thread, donc aucun
+    # attribut) ni les appelants existants qui ignorent cet attribut.
+    # EN: CONFIRMED LEAK (architecture audit, 2026-07-18): stop_event used to
+    # EN: be created here and never exposed to the caller -- build_engine
+    # EN: (main.py) therefore had NO way to stop this thread, which ran
+    # EN: indefinitely even after a character switch (cf. app.py::
+    # EN: BotController.set_profile, "the old engine and its detection/input
+    # EN: threads stay idle"). Attached as an attribute on the closure rather
+    # EN: than changing the return type (build_engine calls these 3 factories
+    # EN: (Meiko/Tariq/Vigour) generically and only expects a callable): a
+    # EN: getattr(state_update_fn, "stop_event", None) on the caller's side is
+    # EN: enough, without breaking Vigour (synchronous, no thread, so no
+    # EN: attribute) nor existing callers that ignore this attribute.
+    state_update_fn.stop_event = stop_event
     return state_update_fn
 
 
@@ -374,6 +397,112 @@ HAMMER_STORM_CASTING_THRESHOLD = 0.02   # en dessous, on considère la canalisat
 # EN: discrete events (proc, cast, expiration), not continuously -- no need to
 # EN: re-read them at the engine tick frequency.
 YOLO_DETECT_INTERVAL_S = 0.15   # ~6-7 ticks au rythme actuel (~23ms/tick median, cf. tick_timing_test.py) -- desserré depuis 0.1 (~4-5 ticks) pour réduire la fréquence des ticks chers, réactivité encore largement suffisante face au vrai goulot (attente de Fury, plusieurs secondes) · EN: ~6-7 ticks at the current rate (~23ms/tick median, cf. tick_timing_test.py) -- loosened from 0.1 (~4-5 ticks) to reduce the frequency of expensive ticks, reactivity still amply sufficient against the real bottleneck (waiting for Fury, several seconds)
+
+# HYSTÉRÈSE (2026-07-19) -- BUG TROUVÉ EN JEU (rapporté par l'utilisateur) :
+# hammer_storm_proc pressé sans proc visible, MÊME après le fix d'expiration
+# à 30s (cf. TARIQ_PROC_EXPIRE_S, hooks.py) -- analyse de debug.log (session
+# 19:32-21:20) : 43/336 presses avec hammer_storm_empowered lu absent depuis
+# 43 à 644 ticks (~0.7s à ~10.7s à 60Hz), TOUTES largement sous le seuil de
+# 30s (donc pas rattrapées par l'expiration). Or le proc dure réellement 30s
+# en jeu (confirmé par l'utilisateur) -- une absence continue de plusieurs
+# secondes PENDANT que le buff est censé encore être actif n'est pas de la
+# staleness, c'est une vraie coupure de détection (positionnement de l'icône
+# dans une buff bar dynamique -- cf. le même phénomène déjà documenté pour
+# Meiko, "l'icône peut se déplacer dans le plateau de buffs selon ce qui est
+# actif simultanément" -- ou occultation ponctuelle).
+#
+# Solution : seuil de confiance ASYMÉTRIQUE (recherchée -- technique standard
+# de stabilisation temps réel pour ce type de scintillement, cf. papiers sur
+# le tracking YOLO : seuil haut pour ENTRER dans l'état actif, plus bas pour
+# y RESTER une fois entré -- absorbe une chute de confiance ponctuelle SANS
+# retarder la détection d'un vrai NOUVEAU proc, cf. _detection_cycle plus
+# bas). TARIQ_BUFF_CONF_HIGH = seuil de production existant (0.4, inchangé,
+# calibré au 2026-07-12 pour distinguer hammer_storm_buff de
+# skull_crusher_buff). TARIQ_BUFF_CONF_LOW = point de départ RAISONNABLE,
+# PAS ENCORE VALIDÉ EN JEU (même statut que les autres seuils de ce fichier
+# à leur introduction) -- proportionnel au ratio 0.45/0.7≈64% trouvé dans la
+# littérature, appliqué à notre seuil haut de 0.4 (0.4*0.64≈0.26, arrondi à
+# 0.20 par marge de sécurité supplémentaire vu qu'aucune mesure de confiance
+# réelle sur les cas d'absence de ce projet n'est encore disponible). À
+# recalibrer avec de vraies valeurs de confiance une fois capturées (cf.
+# yolo_check.py) si le phénomène persiste ou si des faux positifs
+# apparaissent.
+# EN: HYSTERESIS (2026-07-19) -- BUG FOUND IN-GAME (reported by the user):
+# EN: hammer_storm_proc pressed without a visible proc, EVEN after the 30s
+# EN: expiration fix (cf. TARIQ_PROC_EXPIRE_S, hooks.py) -- debug.log analysis
+# EN: (session 19:32-21:20): 43/336 presses with hammer_storm_empowered read
+# EN: absent for 43 to 644 ticks (~0.7s to ~10.7s at 60Hz), ALL well under the
+# EN: 30s threshold (so not caught by expiration). But the proc really lasts
+# EN: 30s in-game (confirmed by the user) -- a continuous multi-second absence
+# EN: WHILE the buff is supposed to still be active isn't staleness, it's a
+# EN: real detection dropout (icon positioning in a dynamic buff bar -- cf.
+# EN: the same phenomenon already documented for Meiko, "the icon can shift
+# EN: within the buff tray depending on what else is active simultaneously" --
+# EN: or a brief occlusion).
+# EN:
+# EN: Solution: ASYMMETRIC confidence threshold (researched -- standard
+# EN: real-time stabilization technique for this kind of flicker, cf. YOLO
+# EN: tracking papers: a high threshold to ENTER the active state, a lower one
+# EN: to STAY in it once entered -- absorbs a brief confidence dip WITHOUT
+# EN: delaying detection of a genuinely NEW proc, cf. _detection_cycle below).
+# EN: TARIQ_BUFF_CONF_HIGH = existing production threshold (0.4, unchanged,
+# EN: calibrated on 2026-07-12 to distinguish hammer_storm_buff from
+# EN: skull_crusher_buff). TARIQ_BUFF_CONF_LOW = a REASONABLE starting point,
+# EN: NOT YET VALIDATED in-game (same status as this file's other thresholds
+# EN: at their introduction) -- proportional to the ~64% (0.45/0.7) ratio
+# EN: found in the literature, applied to our 0.4 high threshold
+# EN: (0.4*0.64≈0.26, rounded down to 0.20 for extra safety margin since no
+# EN: real confidence measurement on this project's own absence cases is
+# EN: available yet). Recalibrate with real confidence values once captured
+# EN: (cf. yolo_check.py) if the phenomenon persists or false positives appear.
+TARIQ_BUFF_CONF_HIGH = 0.4
+TARIQ_BUFF_CONF_LOW = 0.20
+
+# {nom de classe YOLO: clé dans last_buff_active/TariqDetectionSnapshot} --
+# extrait en constante pour ne pas le reconstruire à chaque cycle (2026-07-19).
+# EN: {YOLO class name: key in last_buff_active/TariqDetectionSnapshot} --
+# EN: extracted as a constant to avoid rebuilding it every cycle (2026-07-19).
+TARIQ_BUFF_CLASS_TO_KEY = {
+    "hammer_storm_buff": "hammer_storm_empowered",
+    "skull_crusher_buff": "skull_crusher_empowered",
+    "focused_wrath_buff": "focused_wrath_empowered",
+}
+
+
+def apply_buff_hysteresis(found: "dict[str, float]", last_active: "dict[str, bool]", class_to_key: "dict[str, str]") -> None:
+    """Fonction PURE (testable sans écran/mss/ultralytics, cf. test_tariq.py)
+    -- isole la règle d'hystérèse de _detection_cycle (state_update.py), qui
+    lui a besoin d'un vrai écran et ne peut pas être testé directement.
+
+    Met à jour `last_active` EN PLACE (mutation intentionnelle -- c'est
+    l'état persistant d'un cycle de détection au suivant, cf.
+    _run_detection_worker) : pour chaque buff, si `last_active[clé]` était
+    déjà True, le seuil BAS (TARIQ_BUFF_CONF_LOW) suffit à le garder actif ;
+    sinon il faut le seuil HAUT (TARIQ_BUFF_CONF_HIGH) pour l'activer.
+    `found` : dict {classe: confiance} tel que renvoyé par
+    yolo_detect.detect(frame, conf=TARIQ_BUFF_CONF_LOW) -- DOIT être appelé
+    avec le seuil BAS en amont, sinon les détections faibles qu'on veut
+    évaluer ici sont déjà perdues avant d'arriver.
+
+    EN: PURE function (testable without a screen/mss/ultralytics, cf.
+    EN: test_tariq.py) -- isolates the hysteresis rule from
+    EN: _detection_cycle (state_update.py), which needs a real screen and
+    EN: can't be tested directly.
+
+    EN: Updates `last_active` IN PLACE (intentional mutation -- it's the
+    EN: state persisting from one detection cycle to the next, cf.
+    EN: _run_detection_worker): for each buff, if `last_active[key]` was
+    EN: already True, the LOW threshold (TARIQ_BUFF_CONF_LOW) is enough to
+    EN: keep it active; otherwise the HIGH threshold (TARIQ_BUFF_CONF_HIGH)
+    EN: is needed to activate it. `found`: {class: confidence} dict as
+    EN: returned by yolo_detect.detect(frame, conf=TARIQ_BUFF_CONF_LOW) --
+    EN: MUST be called with the LOW threshold upstream, otherwise the weak
+    EN: detections we want to evaluate here are already lost before arriving.
+    """
+    for buff_class, key in class_to_key.items():
+        confidence = found.get(buff_class, 0.0)
+        threshold = TARIQ_BUFF_CONF_LOW if last_active[key] else TARIQ_BUFF_CONF_HIGH
+        last_active[key] = confidence >= threshold
 
 # Seuils par template pour tariq_buff_bar -- PLUS UTILISÉS en détection live
 # depuis le passage à YOLO (cf. make_tariq_state_update_fn, wardenbot/yolo_detect.py) :
@@ -666,6 +795,16 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
     EN: the Hammer Storm cast bar's border bevel.
     """
     last_yolo_detect = {"t": 0.0, "found": {}}
+    # Hysteresis (2026-07-19, cf. TARIQ_BUFF_CONF_HIGH/LOW plus haut) --
+    # persiste ENTRE les cycles (comme last_yolo_detect) pour savoir, à
+    # chaque lecture, si CE buff était déjà considéré actif au cycle
+    # précédent -- décide quel seuil (haut/bas) appliquer cette fois.
+    # EN: Hysteresis (2026-07-19, cf. TARIQ_BUFF_CONF_HIGH/LOW above) --
+    # EN: persists ACROSS cycles (like last_yolo_detect) to know, at each
+    # EN: read, whether THIS buff was already considered active on the
+    # EN: previous cycle -- decides which threshold (high/low) to apply this
+    # EN: time.
+    last_buff_active = {"hammer_storm_empowered": False, "skull_crusher_empowered": False, "focused_wrath_empowered": False}
 
     # BUG TROUVÉ EN JEU (2026-07-12) : "bot à la ramasse" (round 2, après le
     # throttle YOLO) -- mesuré via tick_timing_test.py : mss.grab() coûte un
@@ -886,7 +1025,21 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
                 last_yolo_detect["t"] = now
                 frame = _crop(base_frame, buff_bar_region)
                 _t0 = time.monotonic()
-                last_yolo_detect["found"] = detect(frame)
+                # conf=TARIQ_BUFF_CONF_LOW (pas le défaut 0.4) : on veut que
+                # detect() renvoie AUSSI les détections faibles (avec leur
+                # vraie confiance), pour que l'hystérèse ci-dessous (cf.
+                # TARIQ_BUFF_CONF_HIGH/LOW plus haut) puisse choisir le bon
+                # seuil APRÈS coup -- si on filtrait déjà à 0.4 ici, une
+                # confiance de 0.25 pendant un buff réellement actif serait
+                # perdue avant même d'atteindre la logique d'hystérèse.
+                # EN: conf=TARIQ_BUFF_CONF_LOW (not the 0.4 default): we want
+                # EN: detect() to ALSO return weak detections (with their real
+                # EN: confidence), so the hysteresis below (cf.
+                # EN: TARIQ_BUFF_CONF_HIGH/LOW above) can pick the right
+                # EN: threshold AFTER the fact -- if we already filtered at 0.4
+                # EN: here, a 0.25 confidence during a genuinely active buff
+                # EN: would be lost before even reaching the hysteresis logic.
+                last_yolo_detect["found"] = detect(frame, conf=TARIQ_BUFF_CONF_LOW)
                 _yolo_dur = time.monotonic() - _t0
                 stages["yolo_wrapper_total_ms"] = _yolo_dur * 1000
                 # Décomposition GRATUITE fournie par ultralytics lui-même
@@ -918,10 +1071,19 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
                 # EN: (log_pipeline_diagnostic, at the bottom of
                 # EN: _detection_cycle()) -- a separate check here would be
                 # EN: redundant.
+            # HYSTÉRÈSE (2026-07-19, cf. TARIQ_BUFF_CONF_HIGH/LOW +
+            # apply_buff_hysteresis plus haut) -- last_buff_active persiste
+            # entre les cycles (comme last_yolo_detect), muté EN PLACE par
+            # apply_buff_hysteresis.
+            # EN: HYSTERESIS (2026-07-19, cf. TARIQ_BUFF_CONF_HIGH/LOW +
+            # EN: apply_buff_hysteresis above) -- last_buff_active persists
+            # EN: across cycles (like last_yolo_detect), mutated IN PLACE by
+            # EN: apply_buff_hysteresis.
             found = last_yolo_detect["found"]
-            snap.hammer_storm_empowered = "hammer_storm_buff" in found
-            snap.skull_crusher_empowered = "skull_crusher_buff" in found
-            snap.focused_wrath_empowered = "focused_wrath_buff" in found
+            apply_buff_hysteresis(found, last_buff_active, TARIQ_BUFF_CLASS_TO_KEY)
+            snap.hammer_storm_empowered = last_buff_active["hammer_storm_empowered"]
+            snap.skull_crusher_empowered = last_buff_active["skull_crusher_empowered"]
+            snap.focused_wrath_empowered = last_buff_active["focused_wrath_empowered"]
 
         rage_bar_region = regions.get("rage_bar")
         if rage_bar_region is not None:
@@ -1100,6 +1262,11 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
         state.detection_meta["tariq_bars"] = DetectionMeta(created_at=snap.created_at)
         state.detection_meta["tariq_yolo"] = DetectionMeta(created_at=snap.yolo_created_at)
 
+    # FUITE CONFIRMÉE (audit architecture, 2026-07-18) -- cf. le même
+    # commentaire côté make_meiko_state_update_fn plus haut, identique ici.
+    # EN: CONFIRMED LEAK (architecture audit, 2026-07-18) -- cf. the same
+    # EN: comment on make_meiko_state_update_fn above, identical here.
+    state_update_fn.stop_event = stop_event
     return state_update_fn
 
 
@@ -1608,4 +1775,398 @@ def make_vigour_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatche
         if orb_region is not None:
             state.resources["orbs"] = count_lit_orb_pips(capturer, orb_region["left"], orb_region["top"])
 
+    return state_update_fn
+
+
+# =============================================================================
+# HELENA (Guardian tank) -- 2026-07-19. PREMIER CÂBLAGE synchrone (même
+# philosophie que Phase 1 de Vigour), PUIS PASSÉ EN THREAD LE MÊME JOUR --
+# mesure réelle via tick_timing_test.py helena AVANT/APRÈS (cf. discussion
+# audit performance) : synchrone, 100% des ticks (100/100) dépassaient le
+# budget 30Hz (33.3ms), médiane 43.3ms, p95 59.9ms, max 166.8ms -- 2 grab()
+# séparés (~7ms fixe/appel, mesuré par tick_timing_test.py à l'époque du bug
+# Tariq du 2026-07-12, cf. commentaire plus haut dans ce fichier) + 2
+# cv2.matchTemplate sur une région 350x150, tous synchrones dans tick().
+# EXACTEMENT le même anti-pattern "N grab() séparés par tick" déjà trouvé et
+# corrigé pour Tariq -- réintroduit ici par inattention lors du premier
+# câblage, corrigé le jour même une fois mesuré (pas supposé). Reproduit donc
+# le patron worker + snapshot_box déjà éprouvé 2x dans ce fichier
+# (Meiko/Tariq), à la fréquence la plus légère du lot (10Hz -- 2 grabs + 2
+# matchTemplate, pas de YOLO/OCR, aucune raison de tourner plus vite).
+#
+# FRAÎCHEUR (ajoutée EN MÊME TEMPS que le thread, pas avant) : tant que
+# state_update_fn lisait la barre de façon SYNCHRONE dans tick(), l'âge de la
+# donnée était toujours ~0ms par construction -- un freshness gate aurait été
+# de la plomberie inerte. Une fois un thread séparé dans la boucle (10Hz)
+# tournant à côté d'un tick à 30Hz, jusqu'à ~100ms de latence entre une vraie
+# lecture et sa consommation devient possible -- HELENA_BARS_FRESHNESS_POLICY
+# (plus bas) et le gate dans hooks.py::helena_pre_tick (shield_throw_proc)
+# devenaient alors réellement nécessaires, pas seulement cohérents avec le
+# reste du projet.
+#
+# HELENA_TOUGHNESS_BAR_FILL_BGR : MESURÉ le 2026-07-19 sur
+# Videos/Captures/'Buff hold the line 0.41s.mp4' (46s, personnage Helena en
+# jeu réel), ligne médiane de la région toughness_bar (361,904,228,11,
+# profiles/Default/config.json) -- même sampling que read_fill_pct
+# (frame[h//2, :, :3]). Moyenne sur 5 points loin des marqueurs de seuil
+# (x=5,110,160,210,220, hors des 3 pics de luminosité à x=59-62/117-120/
+# 175-177 qui correspondent aux graduations 5/15/25/35% DR de la barre, PAS
+# au remplissage) : BGR≈(186,80,42), un bleu moyen cohérent sur toute la durée
+# de la vidéo (écart-type faible d'un échantillon à l'autre).
+# RÉSERVE HONNÊTE : la Toughness est restée visuellement quasi pleine sur
+# TOUTE la vidéo source (aucun moment de vidage significatif observé) --
+# cette couleur de REMPLISSAGE est donc fiable, mais le comportement de
+# read_fill_pct à un pourcentage BAS n'a jamais été vérifié contre un vrai
+# screenshot partiellement vide. Même statut que VIGOUR_MANA_BAR_FILL_BGR à
+# son introduction : à revalider dès qu'un moment de Toughness visiblement
+# entamée est capturé.
+# max_gap=6 (pas la valeur par défaut de 2, ni le 4 de mana_bar) : les 3
+# graduations de seuil mesurent 3-4px de large chacune (mesuré directement,
+# cf. ci-dessus) et NE MATCHENT PAS la couleur de remplissage (bien plus
+# clair/blanc) -- sans un max_gap strictement supérieur à leur largeur, le
+# scan s'arrêterait à tort à la 1re graduation rencontrée même barre pleine.
+#
+# EN: HELENA (Guardian tank) -- 2026-07-19. FIRST WIRED synchronously (same
+# EN: philosophy as Vigour's Phase 1), THEN MOVED TO A THREAD the same day --
+# EN: real measurement via tick_timing_test.py helena BEFORE/AFTER (cf.
+# EN: performance audit discussion): synchronous, 100% of ticks (100/100)
+# EN: blew the 30Hz budget (33.3ms), median 43.3ms, p95 59.9ms, max 166.8ms --
+# EN: 2 separate grab() calls (~7ms fixed/call, measured by tick_timing_test.py
+# EN: back at the 2026-07-12 Tariq bug, cf. comment further up this file) + 2
+# EN: cv2.matchTemplate on a 350x150 region, all synchronous inside tick().
+# EN: EXACTLY the same "N separate grab() per tick" anti-pattern already found
+# EN: and fixed for Tariq -- reintroduced here by oversight during the first
+# EN: wiring, fixed the same day once measured (not assumed). So it reproduces
+# EN: the worker + snapshot_box pattern already proven twice in this file
+# EN: (Meiko/Tariq), at the lightest frequency of the three (10Hz -- 2 grabs +
+# EN: 2 matchTemplate, no YOLO/OCR, no reason to run faster).
+# EN:
+# EN: FRESHNESS (added AT THE SAME TIME as the thread, not before): as long as
+# EN: state_update_fn read the bar SYNCHRONOUSLY inside tick(), the data's age
+# EN: was always ~0ms by construction -- a freshness gate would have been
+# EN: inert plumbing. Once a separate thread (10Hz) runs alongside a 30Hz
+# EN: tick, up to ~100ms of latency between a real reading and its consumption
+# EN: becomes possible -- HELENA_BARS_FRESHNESS_POLICY (below) and the gate in
+# EN: hooks.py::helena_pre_tick (shield_throw_proc) then became actually
+# EN: necessary, not just consistent with the rest of the project.
+# EN:
+# EN: HELENA_TOUGHNESS_BAR_FILL_BGR: MEASURED on 2026-07-19 from
+# EN: Videos/Captures/'Buff hold the line 0.41s.mp4' (46s, Helena in a real
+# EN: game), middle row of the toughness_bar region (361,904,228,11,
+# EN: profiles/Default/config.json) -- same sampling as read_fill_pct
+# EN: (frame[h//2, :, :3]). Averaged over 5 points far from the threshold tick
+# EN: marks (x=5,110,160,210,220, outside the 3 brightness spikes at
+# EN: x=59-62/117-120/175-177 which correspond to the bar's 5/15/25/35% DR
+# EN: tick marks, NOT the fill itself): BGR≈(186,80,42), a consistent medium
+# EN: blue across the whole video (low sample-to-sample variance).
+# EN: HONEST CAVEAT: Toughness stayed visually near-full across the ENTIRE
+# EN: source video (no significant drain moment observed) -- this FILL color
+# EN: is therefore reliable, but read_fill_pct's behavior at a LOW percentage
+# EN: has never been checked against a real partially-empty screenshot. Same
+# EN: status as VIGOUR_MANA_BAR_FILL_BGR when it was introduced: to revalidate
+# EN: once a moment of visibly-drained Toughness is captured.
+# EN: max_gap=6 (not the 2 default, nor mana_bar's 4): the 3 threshold tick
+# EN: marks each measure 3-4px wide (directly measured, cf. above) and do NOT
+# EN: match the fill color (much brighter/whiter) -- without a max_gap
+# EN: strictly above their width, the scan would wrongly stop at the first
+# EN: tick mark it hits even on a full bar.
+# =============================================================================
+HELENA_TOUGHNESS_BAR_FILL_BGR = (186, 80, 42)
+
+# Throttle du worker = 10Hz (period=0.1s) -- cf. commentaire de tête : 2 grabs
+# + 2 matchTemplate, aucun YOLO/OCR, rien ne justifie plus vite. fresh_ms=100
+# = exactement 1 cycle worker (aussi bon qu'une lecture à l'instant du point
+# de vue du tick 30Hz qui la consomme) ; stale_ms=300 = 3 cycles, même ratio
+# que TARIQ_YOLO_FRESHNESS_POLICY (200/600, ratio x3) appliqué à ce throttle-ci.
+# Valeurs de départ, pas encore validées en jeu (même statut que les autres
+# FreshnessPolicy de ce fichier à leur introduction).
+# EN: Worker throttle = 10Hz (period=0.1s) -- cf. header comment: 2 grabs + 2
+# EN: matchTemplate, no YOLO/OCR, nothing justifies going faster. fresh_ms=100
+# EN: = exactly 1 worker cycle (as good as an instant reading from the 30Hz
+# EN: tick's point of view) ; stale_ms=300 = 3 cycles, same ratio as
+# EN: TARIQ_YOLO_FRESHNESS_POLICY (200/600, x3 ratio) applied to this throttle.
+# EN: Starting values, not yet validated in-game (same status as this file's
+# EN: other FreshnessPolicy at their introduction).
+HELENA_BARS_FRESHNESS_POLICY = FreshnessPolicy(fresh_ms=100, stale_ms=300)
+
+
+@dataclass
+class HelenaDetectionSnapshot:
+    """MUTABLE (comme MeikoDetectionSnapshot/TariqDetectionSnapshot) --
+    construit incrémentalement champ par champ dans le worker AVANT
+    publication atomique dans snapshot_box (cf. _run_helena_detection_worker).
+
+    EN: MUTABLE (like MeikoDetectionSnapshot/TariqDetectionSnapshot) -- built
+    EN: incrementally field by field in the worker BEFORE atomic publication
+    EN: into snapshot_box (cf. _run_helena_detection_worker).
+    """
+    toughness: float = 0.0
+    hold_the_line_buff: bool = False
+    shield_throw_proc: bool = False
+    created_at: float = 0.0
+
+
+def _run_helena_detection_worker(regions: dict, snapshot_box: dict, stop_event: threading.Event) -> None:
+    """Worker dédié (2026-07-19, cf. commentaire de tête HELENA plus haut --
+    mesure tick_timing_test.py qui a confirmé la régression, pas une
+    supposition). Même structure que _run_meiko_detection_worker : instance
+    ScreenCapture propre à CE thread (mss n'est valide que sur son thread de
+    création), publication atomique en fin de cycle, exceptions isolées pour
+    ne jamais tuer le thread silencieusement (cf. run_forever/InputWorker,
+    même principe de robustesse partout dans ce projet).
+
+    EN: Dedicated worker (2026-07-19, cf. the HELENA header comment above --
+    EN: a tick_timing_test.py measurement that confirmed the regression, not
+    EN: a guess). Same structure as _run_meiko_detection_worker: a
+    EN: ScreenCapture instance private to THIS thread (mss is only valid on
+    EN: its creation thread), atomic publication at the end of each cycle,
+    EN: isolated exceptions so the thread is never silently killed (cf.
+    EN: run_forever/InputWorker, the same robustness principle throughout
+    EN: this project).
+    """
+    from wardenbot.diagnostics import log_error  # import tardif -- même raison que ailleurs dans ce fichier
+
+    worker_capturer = ScreenCapture()
+    worker_matcher = TemplateMatcher("templates/helena")   # cf. wardenbot/game_config.py CHARACTERS["helena"]["templates"]
+    period = 1.0 / 10.0
+
+    while not stop_event.is_set():
+        start = time.monotonic()
+        try:
+            snap = HelenaDetectionSnapshot()
+
+            toughness_region = regions.get("toughness_bar")
+            if toughness_region is not None:
+                toughness_frame = worker_capturer.grab(toughness_region)
+                snap.toughness = read_fill_pct(
+                    toughness_frame, HELENA_TOUGHNESS_BAR_FILL_BGR, tolerance=30, direction="ltr", max_gap=6
+                )
+
+            buff_bar_region = regions.get("helena_buff_bar")
+            if buff_bar_region is not None:
+                buff_frame = worker_capturer.grab(buff_bar_region)
+                if (worker_matcher.template_dir / "hold_the_line_buff.png").exists():
+                    snap.hold_the_line_buff = worker_matcher.is_match(buff_frame, "hold_the_line_buff")
+                if (worker_matcher.template_dir / "shield_throw_proc.png").exists():
+                    snap.shield_throw_proc = worker_matcher.is_match(buff_frame, "shield_throw_proc")
+
+            snap.created_at = time.monotonic()
+            snapshot_box["latest"] = snap   # publication atomique -- jamais de mutation en place
+        except Exception as exc:
+            log_error("helena_detection_worker", exc)
+        time.sleep(max(0.0, period - (time.monotonic() - start)))
+
+
+def make_helena_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher, regions: dict):
+    """
+    Lance _run_helena_detection_worker (thread dédié, 10Hz) et copie sa
+    dernière snapshot dans state.buffs/resources/detection_meta à chaque
+    tick -- même montage que make_meiko_state_update_fn (snapshot_box,
+    publication atomique, stop_event exposé en attribut pour
+    RotationEngine.shutdown(), cf. main.py::build_engine/_shutdown).
+
+    `capturer`/`matcher` (reçus en argument) ne sont PAS utilisés par le
+    thread -- le worker construit les SIENS propres (mss n'est valide que sur
+    son thread de création, cf. _run_helena_detection_worker). Ils restent
+    dans la signature uniquement pour respecter le contrat commun à toutes
+    les factories make_*_state_update_fn (cf. CHARACTERS, game_config.py).
+
+    detection_meta["helena_bars"] utilise snap.created_at (l'instant RÉEL de
+    la dernière lecture worker), jamais time.monotonic() au moment de la
+    copie -- sinon la donnée semblerait TOUJOURS fraîche quelle que soit sa
+    vraie latence, ce qui viderait HELENA_BARS_FRESHNESS_POLICY de son sens.
+
+    EN: Starts _run_helena_detection_worker (dedicated thread, 10Hz) and
+    EN: copies its latest snapshot into state.buffs/resources/detection_meta
+    EN: every tick -- same setup as make_meiko_state_update_fn (snapshot_box,
+    EN: atomic publication, stop_event exposed as an attribute for
+    EN: RotationEngine.shutdown(), cf. main.py::build_engine/_shutdown).
+
+    EN: `capturer`/`matcher` (received as arguments) are NOT used by the
+    EN: thread -- the worker builds its OWN (mss is only valid on its
+    EN: creation thread, cf. _run_helena_detection_worker). They stay in the
+    EN: signature only to respect the common contract shared by every
+    EN: make_*_state_update_fn factory (cf. CHARACTERS, game_config.py).
+
+    EN: detection_meta["helena_bars"] uses snap.created_at (the REAL instant
+    EN: of the last worker reading), never time.monotonic() at copy time --
+    EN: otherwise the data would ALWAYS look fresh regardless of its real
+    EN: latency, which would empty HELENA_BARS_FRESHNESS_POLICY of its
+    EN: meaning.
+    """
+    snapshot_box = {"latest": HelenaDetectionSnapshot()}
+    stop_event = threading.Event()
+    worker_thread = threading.Thread(
+        target=_run_helena_detection_worker, args=(regions, snapshot_box, stop_event),
+        daemon=True, name="helena-detection-worker",
+    )
+    worker_thread.start()
+
+    def state_update_fn(state: CombatState) -> None:
+        snap = snapshot_box["latest"]
+        state.resources["toughness"] = snap.toughness
+        state.buffs["hold_the_line_buff"] = snap.hold_the_line_buff
+        state.buffs["shield_throw_proc"] = snap.shield_throw_proc
+        state.detection_meta["helena_bars"] = DetectionMeta(created_at=snap.created_at)
+
+    state_update_fn.stop_event = stop_event   # cf. main.py::build_engine::_shutdown, fix fuite de threads du 2026-07-18
+    return state_update_fn
+
+
+# =============================================================================
+# SARYN (Warframe) -- 2026-07-20, PREMIER PERSONNAGE HORS FELLOWSHIP. Cf.
+# config/saryn.yaml pour le détail de la mécanique (assistant 2 sorts,
+# jamais un pilote automatique complet -- cf. discussion CGU Warframe) et ce
+# qui reste à calibrer avant que ça tourne en jeu (aucune capture Warframe à
+# ce stade -- state_update_fn=None dans CHARACTERS["saryn"], cf.
+# game_config.py, tant que les régions n'existent pas dans un profil).
+#
+# THREAD DÉDIÉ DÈS LE DÉPART (pas de Phase 1 synchrone comme Vigour/Helena à
+# leur premier câblage) : l'OCR (EasyOCR) est documenté comme NETTEMENT plus
+# coûteux qu'un simple template match (cf. wardenbot/ocr.py, "ne JAMAIS
+# l'appeler à la fréquence du tick engine") -- 3 appels OCR par cycle ici
+# (Énergie + 2 décomptes). Leçon déjà tirée du premier câblage synchrone
+# d'Helena (mesuré : 100% des ticks hors budget, cf. discussion audit
+# performance du 2026-07-19) -- pas de raison de répéter la même erreur puis
+# de la corriger après coup alors que le risque est identique, en pire (OCR
+# plus cher que du template matching).
+#
+# SARYN_OCR_INTERVAL_S = 0.5s (~2Hz) : "5-10 appels/seconde maximum"
+# recommandé par ocr.py pour UN SEUL appel -- ici 3 appels/cycle, donc une
+# fréquence de cycle plus basse pour rester dans une marge large. Les durées
+# réelles des buffs (20.62s/37.12s, cf. config/saryn.yaml) rendent une
+# latence de détection de 0.5s totalement négligeable -- aucune raison de
+# tourner plus vite.
+#
+# EN: SARYN (Warframe) -- 2026-07-20, FIRST NON-FELLOWSHIP CHARACTER. Cf.
+# EN: config/saryn.yaml for the mechanic's detail (a 2-ability assistant,
+# EN: never a full autopilot -- cf. Warframe ToS discussion) and what's left
+# EN: to calibrate before this runs in-game (no Warframe capture at this
+# EN: stage -- state_update_fn=None in CHARACTERS["saryn"], cf.
+# EN: game_config.py, as long as the regions don't exist in a profile).
+#
+# EN: DEDICATED THREAD FROM THE START (no synchronous Phase 1 like
+# EN: Vigour/Helena at their first wiring): OCR (EasyOCR) is documented as
+# EN: NOTABLY more expensive than a simple template match (cf.
+# EN: wardenbot/ocr.py, "NEVER call it at the engine tick frequency") -- 3
+# EN: OCR calls per cycle here (Energy + 2 countdowns). A lesson already
+# EN: learned from Helena's first synchronous wiring (measured: 100% of
+# EN: ticks over budget, cf. the 2026-07-19 performance audit discussion) --
+# EN: no reason to repeat the same mistake and fix it afterward when the
+# EN: risk is identical, if not worse (OCR costs more than template matching).
+#
+# EN: SARYN_OCR_INTERVAL_S = 0.5s (~2Hz): ocr.py recommends "5-10 calls/sec
+# EN: max" for A SINGLE call -- here it's 3 calls/cycle, so a lower cycle
+# EN: frequency to stay within a wide margin. The buffs' real durations
+# EN: (20.62s/37.12s, cf. config/saryn.yaml) make a 0.5s detection latency
+# EN: totally negligible -- no reason to run faster.
+SARYN_OCR_INTERVAL_S = 0.5
+SARYN_BARS_FRESHNESS_POLICY = FreshnessPolicy(fresh_ms=500, stale_ms=1500)
+
+
+@dataclass
+class SarynDetectionSnapshot:
+    """MUTABLE (comme les autres Snapshot de ce fichier) -- construite
+    incrémentalement dans le worker AVANT publication atomique.
+
+    EN: MUTABLE (like this file's other Snapshots) -- built incrementally in
+    EN: the worker BEFORE atomic publication.
+    """
+    energy: float = 0.0
+    toxic_lash_active: bool = False
+    nourish_active: bool = False
+    created_at: float = 0.0
+
+
+def _run_saryn_detection_worker(regions: dict, snapshot_box: dict, stop_event: threading.Event) -> None:
+    """Worker OCR dédié -- instance ScreenCapture propre à CE thread (mss
+    n'est valide que sur son thread de création, même principe que
+    Meiko/Tariq/Helena). energy : read_digits (valeur absolue, ex. 110, 200).
+    toxic_lash/nourish : read_countdown_seconds sur l'icône de la
+    compétence -- actif tant qu'un décompte > 0 est lu, retombé si rien
+    n'est lisible (None) ou si le décompte atteint 0.
+
+    EN: Dedicated OCR worker -- ScreenCapture instance private to THIS
+    EN: thread (mss is only valid on its creation thread, same principle as
+    EN: Meiko/Tariq/Helena). energy: read_digits (absolute value, e.g. 110,
+    EN: 200). toxic_lash/nourish: read_countdown_seconds on the ability's
+    EN: icon -- active as long as a countdown > 0 is read, expired if
+    EN: nothing readable (None) or the countdown reaches 0.
+    """
+    worker_capturer = ScreenCapture()
+
+    while not stop_event.is_set():
+        start = time.monotonic()
+        try:
+            snap = SarynDetectionSnapshot()
+
+            energy_region = regions.get("energy")
+            if energy_region is not None:
+                frame = worker_capturer.grab(energy_region)
+                value = read_digits(frame)
+                if value is not None:
+                    snap.energy = float(value)
+
+            toxic_lash_region = regions.get("toxic_lash")
+            if toxic_lash_region is not None:
+                frame = worker_capturer.grab(toxic_lash_region)
+                countdown = read_countdown_seconds(frame)
+                snap.toxic_lash_active = countdown is not None and countdown > 0
+
+            nourish_region = regions.get("nourish")
+            if nourish_region is not None:
+                frame = worker_capturer.grab(nourish_region)
+                countdown = read_countdown_seconds(frame)
+                snap.nourish_active = countdown is not None and countdown > 0
+
+            snap.created_at = time.monotonic()
+            snapshot_box["latest"] = snap   # publication atomique -- jamais de mutation en place
+        except Exception as exc:
+            log_error("saryn_detection_worker", exc)
+        time.sleep(max(0.0, SARYN_OCR_INTERVAL_S - (time.monotonic() - start)))
+
+
+def make_saryn_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher, regions: dict):
+    """Lance _run_saryn_detection_worker (thread dédié, OCR throttlé ~2Hz) et
+    copie sa dernière snapshot dans state.resources/buffs/detection_meta à
+    chaque tick -- même montage que make_helena_state_update_fn (snapshot_box,
+    publication atomique, stop_event exposé pour RotationEngine.shutdown()).
+
+    `capturer`/`matcher` reçus en argument ne sont PAS utilisés par le thread
+    (mss n'est valide que sur son thread de création) -- gardés uniquement
+    pour respecter le contrat commun à toutes les factories
+    make_*_state_update_fn (cf. CHARACTERS, game_config.py). `matcher`
+    d'ailleurs n'est pas utilisé DU TOUT ici (aucun template matching pour
+    Saryn, tout passe par OCR) -- gardé quand même pour la même raison de
+    contrat.
+
+    EN: Starts _run_saryn_detection_worker (dedicated thread, OCR throttled
+    EN: ~2Hz) and copies its latest snapshot into
+    EN: state.resources/buffs/detection_meta every tick -- same setup as
+    EN: make_helena_state_update_fn (snapshot_box, atomic publication,
+    EN: stop_event exposed for RotationEngine.shutdown()).
+
+    EN: `capturer`/`matcher` received as arguments are NOT used by the thread
+    EN: (mss is only valid on its creation thread) -- kept only to respect
+    EN: the common contract shared by every make_*_state_update_fn factory
+    EN: (cf. CHARACTERS, game_config.py). `matcher` in particular isn't used
+    EN: AT ALL here (no template matching for Saryn, everything goes through
+    EN: OCR) -- kept anyway for the same contract reason.
+    """
+    snapshot_box = {"latest": SarynDetectionSnapshot()}
+    stop_event = threading.Event()
+    worker_thread = threading.Thread(
+        target=_run_saryn_detection_worker, args=(regions, snapshot_box, stop_event),
+        daemon=True, name="saryn-detection-worker",
+    )
+    worker_thread.start()
+
+    def state_update_fn(state: CombatState) -> None:
+        snap = snapshot_box["latest"]
+        state.resources["energy"] = snap.energy
+        state.buffs["toxic_lash_active"] = snap.toxic_lash_active
+        state.buffs["nourish_active"] = snap.nourish_active
+        state.detection_meta["saryn_bars"] = DetectionMeta(created_at=snap.created_at)
+
+    state_update_fn.stop_event = stop_event
     return state_update_fn

@@ -1,13 +1,22 @@
 name: Portable tests (quick)
 
 # Ne fait tourner QUE les tests portables (aucune dépendance Windows/GPU) :
-# test_wardenbot.py / test_tariq.py / test_config_manager.py. Vérifié
-# manuellement (venv isolé, uniquement pyyaml+numpy installés) que les 3
-# passent bien dans ces conditions -- le reste (test_dpi_awareness.py,
-# test_environment_detect.py, test_region_selector.py, test_calibration_engine.py)
-# a besoin de ctypes.windll (Windows uniquement), d'un vrai modèle YOLO
-# (torch/ultralytics, lourd) et/ou d'un affichage tkinter réel -- volontairement
-# PAS dans ce workflow, restent des tests locaux manuels.
+# test_wardenbot.py / test_tariq.py / test_config_manager.py / test_helena.py
+# / test_saryn.py / test_vigour.py / test_circuit.py. Les 3 premiers de la
+# 2e moitié (Helena/Saryn/Vigour) ont été ajoutés au projet APRÈS l'écriture
+# de ce workflow -- jamais exclus délibérément, juste absents à l'époque.
+# Vérifié (mêmes imports que test_tariq.py déjà en CI :
+# wardenbot.hooks/engine/freshness/bar_reader/state_update, jamais
+# cv2/mss/torch directement) qu'ils tournent avec les mêmes dépendances
+# minimales que le reste de ce job. test_circuit.py (wardenbot/circuit.py,
+# coupe-circuit auto-pause) et test_paths.py (wardenbot/paths.py,
+# resource_path() packaging PyInstaller) n'importent QUE leur module
+# respectif, stdlib pur par design. Le reste
+# (test_dpi_awareness.py, test_environment_detect.py, test_region_selector.py,
+# test_calibration_engine.py) a besoin de ctypes.windll (Windows uniquement),
+# d'un vrai modèle YOLO (torch/ultralytics, lourd) et/ou d'un affichage
+# tkinter réel -- volontairement PAS dans ce workflow, restent des tests
+# locaux manuels.
 
 on:
   push:
@@ -36,3 +45,18 @@ jobs:
 
       - name: Run test_config_manager.py
         run: python test_config_manager.py
+
+      - name: Run test_helena.py
+        run: python test_helena.py
+
+      - name: Run test_saryn.py
+        run: python test_saryn.py
+
+      - name: Run test_vigour.py
+        run: python test_vigour.py
+
+      - name: Run test_circuit.py
+        run: python test_circuit.py
+
+      - name: Run test_paths.py
+        run: python test_paths.py

@@ -16,6 +16,16 @@
 # EN: here, they aren't even listed.
 # =============================================================================
 
+# gcd_ms: revert à 1100 (2026-07-21) -- le passage à 900ms plus tôt le même
+# jour a été annulé sur demande explicite de l'utilisateur. Retour à la
+# valeur d'origine, mesurée empiriquement (capture 30fps de la barre
+# d'abilities, cf. CLAUDE.md) -- ne pas changer sans nouvelle mesure ou
+# nouvelle demande explicite.
+# EN: gcd_ms: reverted to 1100 (2026-07-21) -- the switch to 900ms earlier
+# EN: the same day was undone at the user's explicit request. Back to the
+# EN: original value, empirically measured (30fps capture of the ability
+# EN: bar, cf. CLAUDE.md) -- do not change without a new measurement or a
+# EN: new explicit request.
 gcd_ms: 1100
 
 abilities:

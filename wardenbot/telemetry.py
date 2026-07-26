@@ -53,7 +53,15 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional
 
-DEFAULT_TELEMETRY_LOG_PATH = Path("telemetry.jsonl")
+from wardenbot import __version__
+from wardenbot.paths import data_path
+
+# data_path(), PAS Path(...) nu (2026-07-26, cf. wardenbot/diagnostics.py
+# pour la justification complète) : c'est le canal du coupe-circuit
+# (wardenbot/circuit.py::log_incident) -- un incident qui échoue à
+# s'écrire silencieusement (CWD différent du dossier de l'exe) serait
+# l'inverse du contrat de ce mécanisme.
+DEFAULT_TELEMETRY_LOG_PATH = data_path("telemetry.jsonl")
 
 # Contrairement à debug.log (écrasé à chaque lancement, cf. main.py), ce
 # fichier doit s'accumuler à travers PLUSIEURS sessions de jeu -- c'est la
@@ -132,6 +140,55 @@ class TelemetryWorker(threading.Thread):
         }
         if extra:
             entry.update(extra)
+        self._queue.put(entry)
+
+    def log_incident(
+        self,
+        reason: str,
+        character: str,
+        last_exception: Optional[BaseException] = None,
+    ) -> None:
+        """Coupe-circuit (cf. wardenbot/circuit.py, audit "RPA professionnel"
+        2026-07-26) : une ligne PAR déclenchement, type d'enregistrement
+        distinct de log_decision (`"type": "incident"` -- log_decision n'a
+        jamais eu ce champ, sa forme reste inchangée) pour que kb_engine.py
+        (ou une lecture humaine de telemetry.jsonl) puisse un jour distinguer
+        les deux sans ambiguïté.
+
+        `reason` : la raison lisible fournie par circuit.py::make_circuit_breaker
+        (contient déjà la durée/le ratio en toutes lettres, ex. "panne
+        franche : 10s sans aucun tick réussi") -- pas de champ durée séparé,
+        ça duplirait la même information sous une autre forme.
+
+        `version` TOUJOURS inclus (wardenbot.__version__) : un telemetry.jsonl
+        récupéré chez l'utilisateur doit identifier quelle build tournait au
+        moment de l'incident.
+
+        EN: Circuit breaker (cf. wardenbot/circuit.py, "professional RPA"
+        EN: audit 2026-07-26): one line PER trip, a record type distinct from
+        EN: log_decision (`"type": "incident"` -- log_decision never had this
+        EN: field, its shape stays unchanged) so kb_engine.py (or a human
+        EN: reading telemetry.jsonl) can one day tell the two apart
+        EN: unambiguously.
+
+        EN: `reason`: the human-readable reason from
+        EN: circuit.py::make_circuit_breaker (already spells out the
+        EN: duration/ratio, e.g. "hard failure: 10s with no successful
+        EN: tick") -- no separate duration field, that would just duplicate
+        EN: the same information in another form.
+
+        EN: `version` ALWAYS included (wardenbot.__version__): a
+        EN: telemetry.jsonl retrieved from a user must identify which build
+        EN: was running at the time of the incident.
+        """
+        entry = {
+            "type": "incident",
+            "timestamp": time.time(),
+            "reason": reason,
+            "character": character,
+            "version": __version__,
+            "last_exception": repr(last_exception) if last_exception is not None else None,
+        }
         self._queue.put(entry)
 
     def stop(self, timeout: Optional[float] = 5.0) -> None:

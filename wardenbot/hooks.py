@@ -107,7 +107,10 @@ from typing import Optional
 
 from .engine import CombatState, Intent
 from .freshness import Freshness
-from .state_update import VIGOUR_PARTY_FRESHNESS_POLICY
+from .state_update import (
+    HELENA_BARS_FRESHNESS_POLICY, MEIKO_YOLO_FRESHNESS_POLICY, TARIQ_BARS_FRESHNESS_POLICY,
+    TARIQ_YOLO_FRESHNESS_POLICY, VIGOUR_PARTY_FRESHNESS_POLICY,
+)
 from wardenbot.diagnostics import log_press_confirmation
 
 FINISHER_DELAY_S = 0.15   # laisse au jeu le temps d'enregistrer la 2e pièce · EN: gives the game time to register the 2nd piece
@@ -367,6 +370,38 @@ def _meiko_choose_combo_step(state: CombatState) -> Optional[str]:
     # EN: --- Everything below presses a REAL key subject to the GCD -- we only
     # EN: act if the previous strike's GCD is over. ---
     if now < state.gcd_until:
+        return None
+
+    # FRAÎCHEUR (audit architecture, 2026-07-17) : jusqu'ici, meiko_pre_tick
+    # ne consultait JAMAIS state.detection_meta -- seul Vigour le faisait
+    # (cf. vigour_pre_tick). Pourtant meiko_yolo EST rempli à chaque tick par
+    # state_update_fn (cf. state_update.py) et sert de source à vortex_up/
+    # strikes_up/stormfall/earthfall juste en dessous : sans ce gate, un
+    # thread de détection bloqué (cf. CLAUDE.md, épisodes de snapshot figé
+    # déjà rencontrés côté Tariq) ferait décider ce hook sur un état de buff
+    # gelé indéfiniment, sans qu'aucun symptôme visible ne le trahisse. Placé
+    # APRÈS la branche finisher ci-dessus (qui ne lit aucun buff, juste
+    # FINISHER_DELAY_S -- la bloquer laisserait un combo à moitié pressé) et
+    # APRÈS le gate GCD (cohérent avec l'ordre déjà établi). Retourne None
+    # (pas de décision) -- le scan de priorité YAML reprend alors la main
+    # avec un ouvreur sûr (earth_fist/wind_kick) plutôt que d'agir sur du
+    # périmé.
+    # EN: FRESHNESS (architecture audit, 2026-07-17): until now,
+    # EN: meiko_pre_tick never consulted state.detection_meta at all -- only
+    # EN: Vigour did (cf. vigour_pre_tick). Yet meiko_yolo IS filled every tick
+    # EN: by state_update_fn (cf. state_update.py) and feeds vortex_up/
+    # EN: strikes_up/stormfall/earthfall right below: without this gate, a
+    # EN: stuck detection thread (cf. CLAUDE.md, frozen-snapshot episodes
+    # EN: already hit on the Tariq side) would make this hook decide on a
+    # EN: buff state frozen indefinitely, with no visible symptom giving it
+    # EN: away. Placed AFTER the finisher branch above (which reads no buff,
+    # EN: just FINISHER_DELAY_S -- blocking it would leave a combo half-
+    # EN: pressed) and AFTER the GCD gate (consistent with the order already
+    # EN: established). Returns None (no decision) -- the YAML priority scan
+    # EN: then takes over with a safe opener (earth_fist/wind_kick) rather
+    # EN: than acting on stale data.
+    meiko_meta = state.detection_meta.get("meiko_yolo")
+    if meiko_meta is None or MEIKO_YOLO_FRESHNESS_POLICY.classify(meiko_meta.age_ms(now=now)) == Freshness.EXPIRED:
         return None
 
     # --- Storm (Wind Kick 1re pièce) : build ou spend selon la charge Stormfall ---
@@ -793,6 +828,46 @@ TARIQ_PROC_BUFFS = {
 # EN: delaying a real proc (3 ticks ~100ms at 30Hz, negligible against the 1s
 # EN: GCD).
 MIN_ABSENT_TICKS = 3
+
+# BUG TROUVÉ EN JEU (rapporté par l'utilisateur, 2026-07-19) : "hammer storm
+# sans proc" -- analyse de debug.log (session 16:52-17:15) : sur 119 presses
+# hammer_storm_proc réelles, 11 sont parties avec hammer_storm_empowered déjà
+# lu absent depuis 33 à 1120 ticks (~0.5s à ~18.7s à 60Hz). Root cause :
+# XXX_ready n'expirait JAMAIS une fois armé -- seul un vrai cast confirmé
+# (tariq_post_tick) l'effaçait. Si fury_above:55 (ou le seuil réduit sous
+# Focused Wrath) mettait du temps à être atteint après l'armement, le proc
+# restait consommable indéfiniment, bien après que son glow ait disparu à
+# l'écran. TARIQ_PROC_EXPIRE_S = 30.0 : durée RÉELLE du proc confirmée par
+# l'utilisateur (2026-07-19) -- peut cumuler jusqu'à 2 charges, mais le badge
+# ne l'affiche jamais (cf. simplification du 2026-07-12 ci-dessous, "le jeu
+# n'affiche JAMAIS '2' sur ce badge") -- MÊME principe ici : pas de tentative
+# de compter les charges, juste ne plus laisser ready traîner indéfiniment
+# au-delà de la durée réelle d'UNE charge. Appliquée aux DEUX procs de
+# TARIQ_PROC_BUFFS (même boucle générique) -- confirmée par l'utilisateur
+# UNIQUEMENT pour hammer_storm_proc, étendue à skull_crusher_proc par
+# analogie (même mécanisme de proc, aucune preuve d'une durée différente,
+# mais PAS indépendamment confirmée -- à surveiller comme les autres seuils
+# de ce fichier avant validation en jeu).
+# EN: BUG FOUND IN-GAME (reported by the user, 2026-07-19): "hammer storm
+# EN: without a proc" -- analysis of debug.log (session 16:52-17:15): out of
+# EN: 119 real hammer_storm_proc presses, 11 fired with hammer_storm_empowered
+# EN: already read absent for 33 to 1120 ticks (~0.5s to ~18.7s at 60Hz). Root
+# EN: cause: XXX_ready NEVER expired once armed -- only a real confirmed cast
+# EN: (tariq_post_tick) cleared it. If fury_above:55 (or the reduced threshold
+# EN: under Focused Wrath) took a while to be reached after arming, the proc
+# EN: stayed consumable indefinitely, long after its glow had disappeared on
+# EN: screen. TARIQ_PROC_EXPIRE_S = 30.0: the proc's REAL duration confirmed
+# EN: by the user (2026-07-19) -- can stack up to 2 charges, but the badge
+# EN: never shows it (cf. the 2026-07-12 simplification below, "the game
+# EN: NEVER shows '2' on that badge") -- SAME principle here: no attempt to
+# EN: count charges, just stop letting ready linger indefinitely past a
+# EN: single charge's real duration. Applied to BOTH procs in
+# EN: TARIQ_PROC_BUFFS (same generic loop) -- confirmed by the user ONLY for
+# EN: hammer_storm_proc, extended to skull_crusher_proc by analogy (same proc
+# EN: mechanism, no evidence of a different duration, but NOT independently
+# EN: confirmed -- to watch like this file's other thresholds before in-game
+# EN: validation).
+TARIQ_PROC_EXPIRE_S = 30.0
 
 # Hammer Storm est un cast (canalisation) qui ne doit JAMAIS être coupé par
 # une autre ability -- y compris les off_gcd (culling_strike, focused_wrath,
@@ -1258,25 +1333,72 @@ def _tariq_pre_tick_impl(state: CombatState) -> Optional[str]:
             state.hooks["hammer_storm_proc_ready"] = False
             state.hooks["_hammer_storm_proc_pending"] = False
 
-    pending_since = state.hooks.get("_hammer_storm_proc_pending_since")
-    if pending_since is not None and now - pending_since > HAMMER_STORM_PROC_CONFIRM_WINDOW_S:
-        # Fenêtre expirée sans canalisation détectée -> le jeu a refusé le
-        # cast (Fury réelle insuffisante, très probablement). ready n'a
-        # JAMAIS été effacé (cf. tariq_post_tick) -- rien à restaurer, on
-        # lève juste le marqueur d'attente pour permettre une nouvelle
-        # tentative dès que les conditions sont réunies.
-        # EN: Window expired with no channel detected -> the game refused the
-        # EN: cast (insufficient real Fury, very likely). ready was NEVER
-        # EN: cleared (cf. tariq_post_tick) -- nothing to restore, we just lift
-        # EN: the pending marker to allow a new attempt as soon as the
-        # EN: conditions are met.
-        state.hooks["_hammer_storm_proc_pending"] = False
-        state.hooks.pop("_hammer_storm_proc_pending_since", None)
+    # PLUS DE CLEAR SUR TIMEOUT ICI (retiré le 2026-07-20, BUG TROUVÉ EN JEU,
+    # rapporté par l'utilisateur -- corrélé précisément avec debug.log) :
+    # l'ancien code effaçait _hammer_storm_proc_pending dès que
+    # HAMMER_STORM_PROC_CONFIRM_WINDOW_S (0.5s) s'écoulait SANS canalisation
+    # détectée -- en supposant "le jeu a refusé le cast". Mais si la
+    # canalisation démarre VRAIMENT, juste détectée un peu APRÈS ces 0.5s
+    # (ex. pendant un des stalls multi-secondes du worker de détection déjà
+    # documentés, cf. capture_watchdog.log/_run_detection_worker), la
+    # confirmation tardive arrivait alors que _pending était déjà remis à
+    # False -- la condition `if state.hooks.get("_hammer_storm_proc_pending",
+    # False):` du bloc juste au-dessus ne s'exécutait donc JAMAIS pour ce
+    # press, et `ready` restait bloqué à True INDÉFINIMENT (jusqu'à
+    # TARIQ_PROC_EXPIRE_S, 30s). Effet observé et corrélé (2026-07-20) :
+    # hammer_storm_proc repart plusieurs fois sur le MÊME proc déjà dépensé,
+    # à chaque fois SANS buff empowered réellement actif -- exactement le
+    # symptôme rapporté.
+    #
+    # On NE PEUT PAS distinguer, au moment où la fenêtre "expire", "le jeu a
+    # vraiment refusé" (cf. test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry,
+    # 2026-07-13 -- ready DOIT rester True pour retenter) de "la canalisation
+    # a juste été détectée en retard" (ce nouveau bug -- ready DOIT être
+    # effacé dès que la confirmation arrive, même tard). Les deux cas sont
+    # indiscernables à cet instant précis -- la seule réponse correcte est de
+    # ne JAMAIS cesser d'écouter une confirmation tardive : le bloc
+    # `if state.detection.get("hammer_storm_casting", False):` plus haut
+    # reste actif tant que _pending n'a pas été levé par une VRAIE
+    # confirmation, quelle que soit la durée d'attente. Le filet de sécurité
+    # contre un press réellement raté pour toujours reste TARIQ_PROC_EXPIRE_S
+    # (30s) -- s'il ne se passe RIEN pendant 30s, ready expire de toute façon
+    # (cf. plus bas), donc pas de risque de rester bloqué en attente sans fin.
+    # EN: NO MORE TIMEOUT CLEAR HERE (removed 2026-07-20, BUG FOUND IN-GAME,
+    # EN: reported by the user -- precisely correlated with debug.log): the
+    # EN: old code cleared _hammer_storm_proc_pending as soon as
+    # EN: HAMMER_STORM_PROC_CONFIRM_WINDOW_S (0.5s) elapsed WITHOUT a detected
+    # EN: channel -- assuming "the game refused the cast". But if the channel
+    # EN: REALLY starts, just detected slightly AFTER those 0.5s (e.g. during
+    # EN: one of the detection worker's already-documented multi-second
+    # EN: stalls, cf. capture_watchdog.log/_run_detection_worker), the late
+    # EN: confirmation then arrived while _pending had already been reset to
+    # EN: False -- the `if state.hooks.get("_hammer_storm_proc_pending",
+    # EN: False):` condition in the block just above therefore NEVER ran for
+    # EN: that press, and `ready` stayed stuck True INDEFINITELY (until
+    # EN: TARIQ_PROC_EXPIRE_S, 30s). Observed and correlated effect
+    # EN: (2026-07-20): hammer_storm_proc fires several times on the SAME
+    # EN: already-spent proc, each time WITHOUT a really active empowered
+    # EN: buff -- exactly the reported symptom.
+    # EN:
+    # EN: We CANNOT tell apart, at the moment the window "expires", "the game
+    # EN: really refused" (cf. test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry,
+    # EN: 2026-07-13 -- ready MUST stay True to retry) from "the channel was
+    # EN: just detected late" (this new bug -- ready MUST be cleared as soon
+    # EN: as the confirmation arrives, however late). The two cases are
+    # EN: indistinguishable at that exact moment -- the only correct answer is
+    # EN: to NEVER stop listening for a late confirmation: the
+    # EN: `if state.detection.get("hammer_storm_casting", False):` block above
+    # EN: stays active as long as _pending hasn't been lifted by a REAL
+    # EN: confirmation, no matter how long the wait. The safety net against a
+    # EN: press that truly failed forever remains TARIQ_PROC_EXPIRE_S (30s) --
+    # EN: if NOTHING happens for 30s, ready expires anyway (cf. below), so
+    # EN: there's no risk of staying stuck waiting forever.
 
     for proc_name, buff_name in TARIQ_PROC_BUFFS.items():
         prev_key = f"_{buff_name}_prev"
         absent_ticks_key = f"_{buff_name}_absent_ticks"
         ready_key = f"{proc_name}_ready"
+        armed_at_key = f"_{ready_key}_armed_at"
 
         was_active = state.hooks.get(prev_key, False)
         is_active = state.buffs.get(buff_name, False)
@@ -1285,12 +1407,84 @@ def _tariq_pre_tick_impl(state: CombatState) -> Optional[str]:
         if is_active:
             if not was_active and absent_ticks >= MIN_ABSENT_TICKS:
                 state.hooks[ready_key] = True
+                state.hooks[armed_at_key] = now
             absent_ticks = 0
         else:
             absent_ticks += 1
 
+        # EXPIRATION (2026-07-19, cf. TARIQ_PROC_EXPIRE_S plus haut) -- tourne
+        # à CHAQUE tick, même sous hard_lock/détection périmée (même raison
+        # que le suivi absent_ticks juste au-dessus : un proc réellement
+        # expiré doit arrêter d'être consommable, peu importe ce que fait le
+        # reste de la fonction ce tick-ci).
+        # EN: EXPIRATION (2026-07-19, cf. TARIQ_PROC_EXPIRE_S above) -- runs
+        # EN: EVERY tick, even under hard_lock/stale detection (same reason as
+        # EN: the absent_ticks tracking just above: a truly expired proc must
+        # EN: stop being consumable, regardless of what else this tick does).
+        if state.hooks.get(ready_key, False):
+            armed_at = state.hooks.get(armed_at_key)
+            if armed_at is not None and now - armed_at > TARIQ_PROC_EXPIRE_S:
+                state.hooks[ready_key] = False
+                state.hooks.pop(armed_at_key, None)
+                if proc_name == "hammer_storm_proc":
+                    # Hygiène (2026-07-20) : depuis le retrait du clear sur
+                    # timeout ci-dessus, _pending peut désormais rester vrai
+                    # en attendant une confirmation qui ne viendra jamais (cast
+                    # réellement refusé, jamais de canalisation) -- si ready
+                    # expire quand même, ça veut dire qu'aucune confirmation
+                    # n'est jamais arrivée en 30s : plus la peine d'écouter,
+                    # on lève aussi le marqueur d'attente pour ne pas le
+                    # laisser traîner indéfiniment.
+                    # EN: Hygiene (2026-07-20): since the timeout clear above
+                    # EN: was removed, _pending can now stay true while waiting
+                    # EN: for a confirmation that will never come (cast really
+                    # EN: refused, no channel ever). If ready expires anyway,
+                    # EN: it means no confirmation ever arrived in 30s: no
+                    # EN: point listening any further, also lift the pending
+                    # EN: marker rather than leaving it dangling forever.
+                    state.hooks["_hammer_storm_proc_pending"] = False
+                    state.hooks.pop("_hammer_storm_proc_pending_since", None)
+
         state.hooks[absent_ticks_key] = absent_ticks
         state.hooks[prev_key] = is_active
+
+    # FRAÎCHEUR (audit architecture, 2026-07-17) : jusqu'ici, cette décision
+    # (comme le reste de _tariq_pre_tick_impl) ne consultait JAMAIS
+    # state.detection_meta -- seul Vigour le faisait. Placé ICI (juste avant
+    # la décision de presse RÉELLE) et PAS en tête de fonction : le planner
+    # (_update_tariq_planner), les confirmations de presse
+    # (_resolve_press_confirmations), le hard_lock Hammer Storm et le suivi
+    # front-montant des procs (boucle TARIQ_PROC_BUFFS juste au-dessus)
+    # doivent continuer à tourner à CHAQUE tick quoi qu'il arrive (absent_ticks
+    # notamment -- le geler pendant une période périmée fausserait la
+    # détection de front montant une fois la détection revenue). Seule la
+    # décision finale (presser un proc sur un fury_pct/ready potentiellement
+    # gelés) est bloquée par une détection périmée -- tariq_bars alimente
+    # fury_pct, tariq_yolo alimente hammer_storm_proc_ready/
+    # skull_crusher_proc_ready (via les buffs, cf. la boucle ci-dessus) : les
+    # deux doivent être fraîches.
+    # EN: FRESHNESS (architecture audit, 2026-07-17): until now, this decision
+    # EN: (like the rest of _tariq_pre_tick_impl) never consulted
+    # EN: state.detection_meta at all -- only Vigour did. Placed HERE (right
+    # EN: before the REAL press decision) and NOT at the top of the function:
+    # EN: the planner (_update_tariq_planner), press confirmations
+    # EN: (_resolve_press_confirmations), the Hammer Storm hard_lock, and the
+    # EN: proc rising-edge tracking (TARIQ_PROC_BUFFS loop just above) must
+    # EN: keep running EVERY tick no matter what (absent_ticks especially --
+    # EN: freezing it during a stale period would throw off rising-edge
+    # EN: detection once detection comes back). Only the FINAL decision
+    # EN: (pressing a proc on a potentially frozen fury_pct/ready) is blocked
+    # EN: by stale detection -- tariq_bars feeds fury_pct, tariq_yolo feeds
+    # EN: hammer_storm_proc_ready/skull_crusher_proc_ready (via the buffs, cf.
+    # EN: the loop above): both need to be fresh.
+    tariq_yolo_meta = state.detection_meta.get("tariq_yolo")
+    tariq_bars_meta = state.detection_meta.get("tariq_bars")
+    tariq_detection_expired = (
+        tariq_yolo_meta is None
+        or TARIQ_YOLO_FRESHNESS_POLICY.classify(tariq_yolo_meta.age_ms(now=now)) == Freshness.EXPIRED
+        or tariq_bars_meta is None
+        or TARIQ_BARS_FRESHNESS_POLICY.classify(tariq_bars_meta.age_ms(now=now)) == Freshness.EXPIRED
+    )
 
     # Focused Wrath réduit de 50% le coût en Fury des 2 prochains Hammer
     # Storm/Skull Crusher (cf. commentaire HAMMER_STORM_PROC_FURY_THRESHOLD_DISCOUNTED
@@ -1304,7 +1498,7 @@ def _tariq_pre_tick_impl(state: CombatState) -> Optional[str]:
     # EN: bot or the user's Leap Smash) and a proc is ready, we consume as soon as
     # EN: the REDUCED threshold is covered rather than waiting for the full
     # EN: threshold required by the normal YAML condition.
-    if state.buffs.get("focused_wrath_empowered", False):
+    if not tariq_detection_expired and state.buffs.get("focused_wrath_empowered", False):
         fury_pct = state.resources.get("fury", 0.0) * 100
         if (
             now >= state.gcd_until
@@ -1847,3 +2041,178 @@ def vigour_post_tick_early_game(state: CombatState, pressed: str) -> None:
     """
     if pressed == "rune_of_renewal" and state.hooks.pop("_early_game_rune_of_renewal_pending", False):
         state.hooks["early_game_rune_of_renewal_tank_applied_at"] = time.monotonic()
+
+
+# =============================================================================
+# HELENA (Guardian tank) -- 2026-07-18/19. config/helena.yaml pour le détail
+# des captures/mappings encore manquants avant que ça tourne parfaitement en
+# jeu. pre_tick_hook AJOUTÉ le 2026-07-19 (n'existait pas au premier portage) :
+# uniquement pour le front montant de shield_throw_proc (bookkeeping pur, ne
+# presse jamais rien lui-même -- cf. helena_pre_tick, retourne toujours []).
+# Le reste de la rotation Season 3 continue de s'exprimer entièrement via le
+# scan de priorité YAML (priority_st/priority_aoe/condition).
+#
+# EN: HELENA (Guardian tank) -- 2026-07-18/19. cf. config/helena.yaml for the
+# EN: detail of captures/mappings still missing before this runs perfectly
+# EN: in-game. pre_tick_hook ADDED 2026-07-19 (didn't exist at the first port):
+# EN: only for shield_throw_proc's rising edge (pure bookkeeping, never
+# EN: presses anything itself -- cf. helena_pre_tick, always returns []). The
+# EN: rest of the Season 3 rotation still expresses entirely through the YAML
+# EN: priority scan (priority_st/priority_aoe/condition).
+# =============================================================================
+
+# Front montant de shield_throw_proc -- MÊME schéma que TARIQ_PROC_BUFFS/
+# MIN_ABSENT_TICKS plus haut dans ce fichier (bug "double-cast" du 2026-07-12,
+# cf. commentaire complet à côté de TARIQ_PROC_BUFFS) : state.buffs["shield_throw_proc"]
+# est un test de NIVEAU (le buff lit-il "actif" CE tick ?) posé par
+# make_helena_state_update_fn (state_update.py) via template match sur
+# helena_buff_bar. Sans front montant, un buff qui reste lu "actif" plusieurs
+# ticks d'affilée referait presser shield_throw_proc plusieurs fois pour UN
+# SEUL proc réel. HELENA_MIN_ABSENT_TICKS filtre le même bruit de compression
+# 1-frame que côté Tariq (valeur identique, même caméra/pipeline de capture).
+# EN: shield_throw_proc rising edge -- SAME scheme as TARIQ_PROC_BUFFS/
+# EN: MIN_ABSENT_TICKS above in this file (the "double-cast" bug from
+# EN: 2026-07-12, cf. the full comment next to TARIQ_PROC_BUFFS):
+# EN: state.buffs["shield_throw_proc"] is a LEVEL test (does the buff read
+# EN: "active" THIS tick?) set by make_helena_state_update_fn (state_update.py)
+# EN: via template match on helena_buff_bar. Without a rising edge, a buff
+# EN: that keeps reading "active" for several ticks in a row would make
+# EN: shield_throw_proc fire several times for ONE real proc.
+# EN: HELENA_MIN_ABSENT_TICKS filters the same 1-frame compression noise as
+# EN: on the Tariq side (identical value, same capture camera/pipeline).
+HELENA_MIN_ABSENT_TICKS = 3
+
+
+def helena_pre_tick(state: CombatState) -> "list[Intent]":
+    """Bookkeeping PUR -- ne presse jamais rien (retourne toujours []).
+    Arme state.hooks["shield_throw_proc_ready"] sur le front montant absent ->
+    présent de state.buffs["shield_throw_proc"], lu par la condition YAML
+    `hooks:shield_throw_proc_ready` (cf. config/helena.yaml::shield_throw_proc).
+    La consommation (remise à False) se fait dans helena_post_tick, au vrai cast.
+
+    EN: PURE bookkeeping -- never presses anything (always returns []). Arms
+    EN: state.hooks["shield_throw_proc_ready"] on the absent -> present rising
+    EN: edge of state.buffs["shield_throw_proc"], read by the YAML condition
+    EN: `hooks:shield_throw_proc_ready` (cf. config/helena.yaml::shield_throw_proc).
+    EN: Consumption (reset to False) happens in helena_post_tick, on the real cast.
+
+    FRAÎCHEUR (2026-07-19, ajoutée EN MÊME TEMPS que le passage en thread de
+    make_helena_state_update_fn -- cf. son commentaire de tête, state_update.py) :
+    armer ready sur une lecture PÉRIMÉE forcerait une presse sur une donnée
+    qu'on ne peut plus garantir à jour -- même principe que l'audit
+    2026-07-17 côté Meiko/Tariq. Le suivi absent_ticks/prev, lui, continue de
+    tourner MÊME périmé (cf. boucle ci-dessous) : le geler pendant une
+    période périmée fausserait la détection de front montant une fois la
+    détection revenue (même raison que TARIQ_PROC_BUFFS, cf. plus haut dans
+    ce fichier).
+
+    EN: FRESHNESS (2026-07-19, added AT THE SAME TIME as
+    EN: make_helena_state_update_fn's move to a thread -- cf. its header
+    EN: comment, state_update.py): arming ready on a STALE reading would force
+    EN: a press on data we can no longer guarantee is up to date -- same
+    EN: principle as the 2026-07-17 audit on the Meiko/Tariq side. The
+    EN: absent_ticks/prev tracking itself keeps running EVEN while stale (cf.
+    EN: loop below): freezing it during a stale period would throw off rising-
+    EN: edge detection once detection comes back (same reason as
+    EN: TARIQ_PROC_BUFFS, cf. above in this file).
+    """
+    was_active = state.hooks.get("_shield_throw_proc_prev", False)
+    is_active = state.buffs.get("shield_throw_proc", False)
+    absent_ticks = state.hooks.get("_shield_throw_proc_absent_ticks", HELENA_MIN_ABSENT_TICKS)
+
+    if is_active:
+        if not was_active and absent_ticks >= HELENA_MIN_ABSENT_TICKS:
+            helena_bars_meta = state.detection_meta.get("helena_bars")
+            is_fresh = (
+                helena_bars_meta is not None
+                and HELENA_BARS_FRESHNESS_POLICY.classify(helena_bars_meta.age_ms()) != Freshness.EXPIRED
+            )
+            if is_fresh:
+                state.hooks["shield_throw_proc_ready"] = True
+        absent_ticks = 0
+    else:
+        absent_ticks += 1
+
+    state.hooks["_shield_throw_proc_absent_ticks"] = absent_ticks
+    state.hooks["_shield_throw_proc_prev"] = is_active
+    return []
+
+
+# Table CDR Veteran of War -- {ability pressée -> {ability réduite: ms}}.
+# UNIQUEMENT les relations où LES DEUX abilities sont auto-castées par
+# config/helena.yaml (donc où `pressed` peut RÉELLEMENT valoir la clé de
+# cette table). Shield Throw (+ son proc) est AUTO-CASTÉE depuis le
+# 2026-07-19 (demande explicite de l'utilisateur) -- sa contribution de CDR
+# (-3s Shockwave) est donc maintenant observable et modélisée ici. Charge
+# reste MANUELLE (non demandée) -- sa contribution (Shield Slam/Shield Throw/
+# Shields Up/Shockwave -6s chacun) reste invisible ici. Gap documenté, pas
+# silencieux (même principe que earthfall/health_pct côté Meiko).
+#
+# Hold the Line n'est PAS dans cette table : son effet sur Shield Slam est un
+# RESET COMPLET ("Resets Shield Slam CD"), pas une réduction proportionnelle
+# en ms -- modélisé à part dans helena_post_tick (cf. plus bas), cette table
+# ne sait exprimer QUE des soustractions bornées.
+# EN: Veteran of War CDR table -- {pressed ability -> {reduced ability: ms}}.
+# EN: ONLY the relations where BOTH abilities are auto-cast by
+# EN: config/helena.yaml (so where `pressed` can ACTUALLY be a key of this
+# EN: table). Shield Throw (+ its proc) has been AUTO-CAST since 2026-07-19
+# EN: (the user's explicit request) -- its CDR contribution (-3s Shockwave) is
+# EN: therefore now observable and modeled here. Charge remains MANUAL (not
+# EN: requested) -- its contribution (Shield Slam/Shield Throw/Shields Up/
+# EN: Shockwave -6s each) stays invisible here. A documented gap, not a silent
+# EN: one (same principle as earthfall/health_pct on the Meiko side).
+# EN:
+# EN: Hold the Line is NOT in this table: its effect on Shield Slam is a FULL
+# EN: RESET ("Resets Shield Slam CD"), not a proportional ms reduction --
+# EN: modeled separately in helena_post_tick (below), this table can only
+# EN: express bounded subtractions.
+HELENA_CDR_MS: "dict[str, dict[str, int]]" = {
+    "measured_strike": {"shield_slam": 1500, "shield_throw": 1500},
+    "power_strike": {"shield_slam": 1500, "shield_throw": 1500},
+    "shield_slam": {"shockwave": 3000},
+    "shield_throw": {"shockwave": 3000},
+    "shield_throw_proc": {"shockwave": 3000},  # toujours un cast de Shield Throw, meme CDR · EN: still a Shield Throw cast, same CDR
+    "shockwave": {"shields_up": 6000},
+}
+
+
+def helena_post_tick(state: CombatState, pressed: str) -> None:
+    """Applique les effets Veteran of War pour `pressed` : d'abord le cas
+    spécial de Hold the Line (RESET complet de Shield Slam, pas une
+    réduction -- cf. HELENA_CDR_MS docstring), puis la table générique de
+    réductions proportionnelles. Ne touche QUE les abilities déjà présentes
+    dans state.cooldown_until (cf. CombatState.record_cast : cooldown_ms<=0
+    n'y écrit jamais rien) -- pas de création d'un cooldown à partir de rien,
+    seulement un raccourcissement/reset d'un cooldown réel.
+
+    EN: Applies the Veteran of War effects for `pressed`: first Hold the
+    EN: Line's special case (FULL reset of Shield Slam, not a reduction -- cf.
+    EN: HELENA_CDR_MS docstring), then the generic proportional-reduction
+    EN: table. Only touches abilities already present in state.cooldown_until
+    EN: (cf. CombatState.record_cast: cooldown_ms<=0 never writes anything
+    EN: there) -- no cooldown created out of nothing, only a real cooldown
+    EN: shortened/reset.
+    """
+    if pressed == "hold_the_line":
+        state.cooldown_until.pop("shield_slam", None)
+    elif pressed == "shield_throw_proc":
+        # Consommation du front montant arme par helena_pre_tick -- meme
+        # principe que TARIQ_PROC_BUFFS (hooks.py, tariq_post_tick) : la
+        # VRAIE presse confirmee (pas juste "propose") efface le flag, une
+        # NOUVELLE transition absent->present sera necessaire pour le
+        # rearmer (cf. helena_pre_tick).
+        # EN: Consumes the rising edge armed by helena_pre_tick -- same
+        # EN: principle as TARIQ_PROC_BUFFS (hooks.py, tariq_post_tick): the
+        # EN: REAL confirmed press (not just "proposed") clears the flag, a
+        # EN: NEW absent->present transition will be needed to rearm it
+        # EN: (cf. helena_pre_tick).
+        state.hooks["shield_throw_proc_ready"] = False
+
+    reductions = HELENA_CDR_MS.get(pressed)
+    if not reductions:
+        return
+    for target, reduction_ms in reductions.items():
+        current = state.cooldown_until.get(target)
+        if current is None:
+            continue
+        state.cooldown_until[target] = current - reduction_ms / 1000.0

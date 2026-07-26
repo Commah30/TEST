@@ -41,7 +41,19 @@ from wardenbot.engine import (
 # EN: wired on RotationEngine, cf. game_config.py) is just a thin wrapper
 # EN: around it that wraps the result in a weight-90 Intent (cf. hooks.py) --
 # EN: tested separately, once, at the bottom of this file.
+from wardenbot.freshness import DetectionMeta
 from wardenbot.hooks import _meiko_choose_combo_step, meiko_post_tick, meiko_pre_tick
+
+
+def _fresh(state: CombatState) -> CombatState:
+    """Marque `state` comme ayant une lecture YOLO Meiko fraîche -- nécessaire
+    depuis l'ajout du gate de fraîcheur (audit architecture, 2026-07-17, cf.
+    hooks.py::_meiko_choose_combo_step) pour que ces tests continuent
+    d'exercer la vraie logique de décision plutôt que de se faire bloquer par
+    le gate lui-même (qui traite detection_meta absent comme périmé, cf.
+    vigour_pre_tick, même principe)."""
+    state.detection_meta["meiko_yolo"] = DetectionMeta(created_at=time.monotonic())
+    return state
 
 
 def drive_combo(state: CombatState, opener: str) -> list[str]:
@@ -63,8 +75,41 @@ def drive_combo(state: CombatState, opener: str) -> list[str]:
     return sequence
 
 
+def test_expired_meiko_detection_blocks_every_decision():
+    """FRAÎCHEUR (audit architecture, 2026-07-17) : meiko_yolo absent ou
+    périmé -> _meiko_choose_combo_step ne doit RIEN décider, même avec un
+    combo en cours (last_cast=wind_kick, stormfall à un niveau qui
+    déclencherait normalement Lashing Stormkick) -- agir sur un état de buff
+    figé serait pire que de laisser le scan reprendre un ouvreur sûr."""
+    from wardenbot.hooks import MEIKO_YOLO_FRESHNESS_POLICY
+
+    # 1. Jamais lu du tout (detection_meta absent).
+    never_read = CombatState()
+    never_read.last_cast = "wind_kick"
+    never_read.resources["stormfall"] = 1.0
+    assert _meiko_choose_combo_step(never_read) is None
+    print("meiko_yolo jamais lu -- aucune décision, même combo Storm en cours.")
+
+    # 2. Lu autrefois, mais largement au-delà du seuil EXPIRED.
+    stale = CombatState()
+    stale.last_cast = "wind_kick"
+    stale.resources["stormfall"] = 1.0
+    stale.detection_meta["meiko_yolo"] = DetectionMeta(
+        created_at=time.monotonic() - (MEIKO_YOLO_FRESHNESS_POLICY.stale_ms / 1000.0 + 1.0)
+    )
+    assert _meiko_choose_combo_step(stale) is None
+    print("meiko_yolo périmé (EXPIRED) -- aucune décision, même combo Storm en cours.")
+
+    # 3. Fraîche -- la décision normale reprend (non-régression).
+    fresh = _fresh(CombatState())
+    fresh.last_cast = "wind_kick"
+    fresh.resources["stormfall"] = 1.0
+    assert _meiko_choose_combo_step(fresh) == "earth_fist_2"
+    print("meiko_yolo fraîche -- la décision normale (Lashing Stormkick) reprend.")
+
+
 def test_default_opens_when_buffs_missing():
-    state = CombatState()
+    state = _fresh(CombatState())
     # Combat start : state.buffs est vide -> les deux buffs sont considérés
     # absents -> pre_tick doit décider d'ouvrir lui-même.
     opener = _meiko_choose_combo_step(state)
@@ -75,7 +120,7 @@ def test_default_opens_when_buffs_missing():
 
 
 def test_default_picks_whichever_buff_is_missing():
-    state = CombatState()
+    state = _fresh(CombatState())
     # Vortex déjà up (détecté à l'écran), Strikes absent -> sans debuff,
     # Strikes doit être choisi puisque c'est LUI qui manque.
     state.buffs["spirited_vortex"] = True
@@ -88,7 +133,7 @@ def test_default_picks_whichever_buff_is_missing():
 
 
 def test_three_stacks_forces_vortex_even_if_strikes_is_missing():
-    state = CombatState()
+    state = _fresh(CombatState())
     # Vortex up, Strikes absent -> sans les 3 stacks, Strikes gagnerait
     # (comme le test précédent). À 3 stacks (compteur), Vortex doit gagner
     # QUAND MÊME. Les stacks sont comptées en code, pas lues sur le badge
@@ -113,7 +158,7 @@ def test_full_sequence_matches_user_example():
     """Reproduit ta séquence de combat start. state.buffs est mis à jour
     manuellement à chaque étape pour simuler ce que state_update_fn ferait
     en lisant vraiment l'écran (dans le vrai bot, c'est automatique)."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.resources["stormfall"] = 0.0
 
     full_log: list[str] = []
@@ -157,7 +202,7 @@ def test_stack_counter_tracks_real_spend_combos_not_visual_badge():
     l'icône est trop petit pour que le template matching le distingue de
     façon fiable, donc les stacks sont comptées ici à partir des VRAIS
     Lashing Stormkick castés, pas d'une lecture pixel."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.resources["stormfall"] = 1.0
 
     # 2 Lashing Stormkick (spend) -> 2 stacks, pas encore assez pour forcer Vortex
@@ -194,7 +239,7 @@ def test_warden_empowerment_alternates_between_vortex_and_strikes():
     entre Vortex et Strikes à chaque nouvelle activation des 3 stacks : 1re
     activation -> Vortex (comportement d'origine conservé), 2e -> Strikes,
     3e -> Vortex, etc. cf. warden_empower_target dans hooks.py."""
-    state = CombatState()
+    state = _fresh(CombatState())
     # Les deux buffs restent up tout du long -- seul le forçage à 3 stacks
     # doit rouvrir le combo défensif ici, jamais un buff manquant.
     state.buffs["spirited_vortex"] = True
@@ -236,7 +281,7 @@ def test_visual_debuff_detection_is_ignored_for_stack_counting():
     premier filet de sécurité qui s'y fiait pour "rattraper" le compteur a
     été retiré car il reproduisait le spam qu'on corrigeait. Ce test prouve
     que ce debuff visuel n'a plus aucune influence sur la décision."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.buffs["spirited_vortex"] = True
     state.buffs["spirited_strikes"] = False
     state.last_cast = "spirit_palm"
@@ -257,7 +302,7 @@ def test_stack_timeout_forces_recalibration():
     from wardenbot.hooks import WARDEN_STACK_TIMEOUT_S, _set_warden_stacks
     import time
 
-    state = CombatState()
+    state = _fresh(CombatState())
     now = time.monotonic()
     _set_warden_stacks(state, now - WARDEN_STACK_TIMEOUT_S - 1.0, 3)  # 3 stacks "posées" il y a longtemps
     assert state.hooks.get("warden_stacks") == 3
@@ -282,7 +327,7 @@ def test_storm_loop_not_interrupted_by_mid_loop_buff_drop():
     laisser la boucle Storm/Earth tourner sans interruption jusqu'à 3 stacks
     (même si Vortex/Strikes retombent entre-temps), forcer Vortex à 3 stacks,
     refresh Strikes si besoin à CE moment précis, puis reprendre la boucle."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.resources["stormfall"] = 0.0
 
     # Ouverture initiale : les deux buffs manquent -> double refresh (Vortex
@@ -354,7 +399,7 @@ def test_strikes_proactive_refresh_before_expiry():
     flickerer -- vérifié ici aussi."""
     from wardenbot.hooks import STRIKES_PROACTIVE_REFRESH_WINDOW_S
 
-    state = CombatState()
+    state = _fresh(CombatState())
     state.buffs["spirited_vortex"] = True
     state.buffs["spirited_strikes"] = True
     state.hooks["meiko_defense_primed"] = True   # déjà primé -- storm loop en cours
@@ -394,7 +439,7 @@ def test_strikes_refresh_confirm_window_prevents_infinite_retrigger_loop():
     PAS en redéclencher un autre avant MEIKO_DEFENSE_CONFIRM_WINDOW_S."""
     from wardenbot.hooks import MEIKO_DEFENSE_CONFIRM_WINDOW_S
 
-    state = CombatState()
+    state = _fresh(CombatState())
     state.buffs["spirited_vortex"] = True
     state.buffs["spirited_strikes"] = True
     state.hooks["meiko_defense_primed"] = True
@@ -451,6 +496,7 @@ def test_detection_exception_on_one_ability_does_not_freeze_the_scan():
         state=CombatState(mode="st"),
         press_fn=lambda name: pressed_names.append(name),
         is_ready_fn=is_ready_fn_that_throws,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
     )
     pressed = engine.tick()
     assert pressed == "filler", (
@@ -467,7 +513,7 @@ def test_meiko_pre_tick_wraps_result_as_weighted_intent():
     contrat Intent (engine.py) : liste vide si rien à proposer, sinon une
     liste d'Intent de poids 90 (cf. hooks.py -- reproduit l'ancien GOTO
     absolu, toujours > 50, le poids de base du scan de priorité YAML)."""
-    state = CombatState()   # rien casté -> ouverture, Vortex/Strikes absents -> ouvre
+    state = _fresh(CombatState())   # rien casté -> ouverture, Vortex/Strikes absents -> ouvre
     intents = meiko_pre_tick(state)
     assert len(intents) == 1, f"attendu exactement 1 Intent, reçu {intents!r}"
     assert intents[0].ability == "spirit_palm"
@@ -505,6 +551,7 @@ def test_engine_tick_prefers_hook_intent_over_scan_intent_by_weight():
         press_fn=lambda name: pressed_names.append(name),
         is_ready_fn=lambda name, threshold=None: True,
         pre_tick_hook=fake_pre_tick_hook,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
     )
     pressed = engine.tick()
     assert pressed == "hook_winner", f"le hook (poids 90) doit gagner sur le scan (poids 50), reçu {pressed!r}"
@@ -574,6 +621,7 @@ def test_sequence_tracker_advances_through_all_steps_in_isolation():
             press_fn=lambda name: pressed_names.append(name),
             is_ready_fn=lambda name, threshold=None: True,
             sequences=sequences,
+            off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
         )
 
         assert engine.tick() == expected_step0, f"{seq_name} : step0 attendu {expected_step0!r}"
@@ -612,7 +660,7 @@ def test_sequence_never_overrides_active_meiko_pre_tick_hook():
         ("earth_fist", "earthfall", 1.0, "wind_kick_2", "meiko_earthfist_barrage"),
     ]
     for opener, resource_key, resource_value, expected_pressed, expected_active_sequence in scenarios:
-        state = CombatState(mode="aoe")
+        state = _fresh(CombatState(mode="aoe"))
         state.last_cast = opener
         state.resources[resource_key] = resource_value
         engine = RotationEngine(
@@ -623,6 +671,7 @@ def test_sequence_never_overrides_active_meiko_pre_tick_hook():
             pre_tick_hook=meiko_pre_tick,
             post_tick_hook=meiko_post_tick,
             sequences=sequences,
+            off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
         )
         pressed = engine.tick()
         assert pressed == expected_pressed, (
@@ -703,6 +752,7 @@ def test_weight_overrides_can_let_scan_win_over_a_weakened_sequence():
             "sequence_ability": -MAX_WEIGHT_MODIFIER,   # 80 - 20 = 60
             "scan_ability": MAX_WEIGHT_MODIFIER,         # 50 + 20 = 70
         },
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
     )
 
     pressed = engine.tick()
@@ -732,6 +782,7 @@ def test_weight_overrides_never_let_scan_beat_a_weakened_hook():
             "hook_ability": -MAX_WEIGHT_MODIFIER,
             "scan_ability": MAX_WEIGHT_MODIFIER,
         },
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
     )
     pressed = engine.tick()
     assert pressed == "hook_ability", f"le hook doit gagner même affaibli au maximum (égalité jamais dépassée), reçu {pressed!r}"
@@ -758,6 +809,7 @@ def test_telemetry_logs_only_when_something_is_pressed():
             press_fn=lambda name: None,
             is_ready_fn=lambda name, threshold=None: True,
             telemetry=worker,
+            off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
         )
         assert engine.tick() is None   # rien de pressé -> pas de log
 
@@ -783,7 +835,7 @@ def test_strikes_not_recast_immediately_after_open_due_to_detection_lag():
     confirmée up, Strikes VIENT d'être ouverte
     (_strikes_open_pending_since tout juste posé) mais sa détection n'a pas
     encore rattrapé (strikes_up=False)."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.last_cast = "fighting_techniques"   # combo Strikes tout juste terminé
     state.buffs["spirited_vortex"] = True     # Vortex déjà confirmée (1er cast du double-open)
     state.buffs["spirited_strikes"] = False   # détection PAS ENCORE rattrapée -- le coeur du bug
@@ -803,7 +855,7 @@ def test_defensive_combo_reopens_once_pending_window_truly_expires():
     reprendre la main -- le fix ne doit pas bloquer un vrai besoin de refresh."""
     from wardenbot.hooks import MEIKO_DEFENSE_CONFIRM_WINDOW_S
 
-    state = CombatState()
+    state = _fresh(CombatState())
     state.last_cast = "fighting_techniques"
     state.buffs["spirited_vortex"] = True
     state.buffs["spirited_strikes"] = False
@@ -822,7 +874,7 @@ def test_lashing_stormkick_fires_again_when_one_orb_still_remains():
     1.0 -> 0.5), pas les deux -- le hook doit continuer à dépenser tant
     qu'il en reste au moins un, pas revenir à 'build' dès que ce n'est plus
     1.0 pile."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.last_cast = "wind_kick"
     state.resources["stormfall"] = 0.5   # 1 seul orbe restant après une 1re dépense
 
@@ -839,7 +891,7 @@ def test_earthfist_barrage_fires_again_when_one_orb_still_remains():
     détection réelle en jeu (cf. CLAUDE.md), mais la LOGIQUE doit être
     cohérente dès aujourd'hui pour ne pas avoir à corriger ce même bug une
     2e fois plus tard."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.last_cast = "earth_fist"
     state.resources["earthfall"] = 0.5
 
@@ -864,6 +916,7 @@ def test_intent_target_triggers_a_target_select_press_before_the_ability():
         press_fn=lambda name: pressed_names.append(name),
         is_ready_fn=lambda name, threshold=None: True,
         pre_tick_hook=hook,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
     )
     pressed = engine.tick()
     assert pressed == "burst_heal", f"tick() doit retourner le sort, pas la touche de ciblage, reçu {pressed!r}"
@@ -888,6 +941,7 @@ def test_intent_without_target_presses_only_the_ability_unchanged():
         press_fn=lambda name: pressed_names.append(name),
         is_ready_fn=lambda name, threshold=None: True,
         pre_tick_hook=hook,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
     )
     pressed = engine.tick()
     assert pressed == "hook_winner"
@@ -895,7 +949,241 @@ def test_intent_without_target_presses_only_the_ability_unchanged():
     print("Intent sans target -- comportement inchangé, aucun press de ciblage parasite.")
 
 
+def test_hook_won_ability_records_its_real_cooldown_not_zero():
+    """BUG CONFIRMÉ (audit architecture, 2026-07-17) : quand un hook/une
+    séquence gagne le tick (poids 90/80 > scan), record_cast() recevait
+    cooldown_ms=0 codé en dur -- l'ability gagnante n'avait donc JAMAIS son
+    vrai cooldown enregistré (cooldown_until=now, déjà expiré au tick
+    suivant). Sans effet pour Meiko (ses combo pieces ne sont pas déclarées
+    dans abilities:) mais critique pour Vigour : toutes ses abilities sont
+    systématiquement proposées par le hook (skip_detection:true), donc
+    is_on_cooldown(...) lisait TOUJOURS False quel que soit le vrai cooldown
+    YAML. Ce test le prouve avec une vraie Ability déclarée (cooldown_ms=9970,
+    comme Dawnbreaker Orb)."""
+    ability = Ability(name="dawnbreaker_orb", cooldown_ms=9970, skip_detection=True)
+
+    def hook(state):
+        return [Intent(ability="dawnbreaker_orb", weight=90, source="test_hook")]
+
+    engine = RotationEngine(
+        abilities=[ability],
+        state=CombatState(mode="st"),
+        press_fn=lambda name: None,
+        is_ready_fn=lambda name, threshold=None: True,
+        pre_tick_hook=hook,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
+    )
+    now_before = time.monotonic()
+    pressed = engine.tick()
+    assert pressed == "dawnbreaker_orb"
+    assert engine.state.is_on_cooldown("dawnbreaker_orb", now_before), (
+        "le cooldown réel (9.97s) doit être enregistré -- pas 0, sinon l'ability "
+        "seraît immédiatement re-disponible au tick suivant malgré son vrai cooldown"
+    )
+    remaining_s = engine.state.cooldown_until["dawnbreaker_orb"] - now_before
+    # Petite marge (+0.05s) : now_before est capturé AVANT tick(), qui relit
+    # time.monotonic() en interne -- toujours légèrement postérieur.
+    # EN: Small margin (+0.05s): now_before is captured BEFORE tick(), which
+    # EN: re-reads time.monotonic() internally -- always slightly later.
+    assert 9.0 < remaining_s <= 9.97 + 0.05, f"cooldown restant attendu ~9.97s, reçu {remaining_s:.2f}s"
+    print("Ability gagnée par un hook -- son VRAI cooldown_ms (9.97s) est enregistré, pas 0.")
+
+
+def test_hook_won_name_not_in_abilities_still_records_zero_cooldown():
+    """Non-régression : les combo pieces de Meiko (spirit_palm_2,
+    fighting_techniques...) ne sont jamais déclarées dans abilities: --
+    _ability_by_name.get(pressed) renvoie None pour elles, donc le fallback
+    cooldown_ms=0 (comportement D'ORIGINE, gate GCD/FINISHER_DELAY_S géré
+    ailleurs dans hooks.py) doit rester inchangé."""
+    def hook(state):
+        return [Intent(ability="fighting_techniques", weight=90, source="test_hook")]
+
+    engine = RotationEngine(
+        abilities=[],   # aucune ability déclarée -- comme warden.yaml pour les combo pieces
+        state=CombatState(mode="st"),
+        press_fn=lambda name: None,
+        is_ready_fn=lambda name, threshold=None: True,
+        pre_tick_hook=hook,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
+    )
+    now = time.monotonic()
+    engine.tick()
+    assert not engine.state.is_on_cooldown("fighting_techniques", now + 0.001), (
+        "une ability non déclarée dans abilities: doit garder son comportement d'origine (cooldown 0)"
+    )
+    print("Combo piece non déclarée (fighting_techniques) -- cooldown reste à 0, comportement inchangé.")
+
+
+def test_shutdown_calls_shutdown_fn_when_provided():
+    """FUITE CONFIRMÉE (audit architecture, 2026-07-18) : RotationEngine
+    n'exposait aucun moyen d'arrêter les ressources externes (InputWorker,
+    thread de détection) construites par son appelant (build_engine,
+    main.py) -- app.py::BotController.set_profile abandonnait donc l'ancien
+    engine sans jamais les arrêter. shutdown() doit appeler shutdown_fn
+    exactement, ni plus ni moins de fois qu'on l'appelle soi-même (pas
+    d'appel automatique caché, cf. docstring)."""
+    calls: list[str] = []
+    engine = RotationEngine(
+        abilities=[],
+        state=CombatState(mode="st"),
+        press_fn=lambda name: None,
+        is_ready_fn=lambda name, threshold=None: True,
+        shutdown_fn=lambda: calls.append("shutdown"),
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
+    )
+    assert calls == [], "shutdown_fn ne doit jamais être appelé automatiquement, seulement via shutdown()"
+    engine.shutdown()
+    assert calls == ["shutdown"]
+    engine.shutdown()
+    assert calls == ["shutdown", "shutdown"], "shutdown() rappelle shutdown_fn à chaque appel -- l'idempotence est la responsabilité de shutdown_fn lui-même"
+    print("RotationEngine.shutdown() appelle shutdown_fn -- jamais automatiquement, exactement à la demande.")
+
+
+def test_shutdown_is_a_no_op_without_shutdown_fn():
+    """Non-régression : aucun appelant existant (tous les tests de ce
+    fichier, notamment) ne fournit shutdown_fn -- shutdown() doit rester un
+    no-op silencieux dans ce cas, comportement par défaut."""
+    engine = RotationEngine(
+        abilities=[],
+        state=CombatState(mode="st"),
+        press_fn=lambda name: None,
+        is_ready_fn=lambda name, threshold=None: True,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
+    )
+    engine.shutdown()   # ne doit lever aucune exception
+    print("RotationEngine.shutdown() sans shutdown_fn -- no-op silencieux, comportement par défaut inchangé.")
+
+
+# =============================================================================
+# PROTOCOLE DE CONFIRMATION INPUT (audit architecture, 2026-07-18, point 1 :
+# "une action mise en file est immédiatement considérée comme réussie") --
+# cf. engine.py::RotationEngine.report_press_outcome/_reconcile_press_outcomes,
+# input_sim.py::InputWorker.on_press_result. report_press_outcome() est
+# appelé directement ici (jamais via un vrai InputWorker threadé -- cf.
+# test_input_sim.py pour la preuve qu'InputWorker l'appelle correctement) :
+# ces tests prouvent la RÉCONCILIATION elle-même, pas le câblage du thread.
+# =============================================================================
+
+def test_press_confirmation_success_is_a_no_op():
+    """success=True -> rien à corriger (cf. portée volontairement limitée du
+    protocole, docstring de RotationEngine.__init__) -- cooldown_until/
+    gcd_until restent exactement ce que le tick avait décidé."""
+    ability = Ability(name="dawnbreaker_orb", cooldown_ms=9970, skip_detection=True)
+
+    def hook(state):
+        return [Intent(ability="dawnbreaker_orb", weight=90, source="test_hook")]
+
+    engine = RotationEngine(
+        abilities=[ability], state=CombatState(mode="st"),
+        press_fn=lambda name: None, is_ready_fn=lambda name, threshold=None: True,
+        pre_tick_hook=hook,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
+    )
+    engine.tick()
+    cooldown_before = engine.state.cooldown_until["dawnbreaker_orb"]
+    gcd_before = engine.state.gcd_until
+
+    engine.report_press_outcome("dawnbreaker_orb", True, time.monotonic())
+    engine._reconcile_press_outcomes(time.monotonic())
+
+    assert engine.state.cooldown_until["dawnbreaker_orb"] == cooldown_before
+    assert engine.state.gcd_until == gcd_before
+    print("Confirmation de succès -- no-op, cooldown/GCD inchangés.")
+
+
+def test_press_confirmation_failure_rolls_back_cooldown_and_gcd():
+    """success=False -> la presse n'a JAMAIS eu lieu en jeu : le cooldown et
+    le GCD qu'elle avait posés doivent disparaître, pas rester verrouillés
+    pour rien (cf. le risque identifié par l'audit)."""
+    ability = Ability(name="dawnbreaker_orb", cooldown_ms=9970, skip_detection=True)
+
+    def hook(state):
+        return [Intent(ability="dawnbreaker_orb", weight=90, source="test_hook")]
+
+    engine = RotationEngine(
+        abilities=[ability], state=CombatState(mode="st"),
+        press_fn=lambda name: None, is_ready_fn=lambda name, threshold=None: True,
+        pre_tick_hook=hook,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
+    )
+    engine.tick()
+    assert engine.state.is_on_cooldown("dawnbreaker_orb", time.monotonic())
+    assert engine.state.gcd_until > time.monotonic()
+
+    failure_ts = time.monotonic()
+    engine.report_press_outcome("dawnbreaker_orb", False, failure_ts)
+    engine._reconcile_press_outcomes(time.monotonic())
+
+    assert not engine.state.is_on_cooldown("dawnbreaker_orb", time.monotonic()), (
+        "le cooldown doit être libéré -- la presse a réellement échoué"
+    )
+    assert engine.state.gcd_until == failure_ts, "le GCD doit être libéré au moment de l'échec, pas laissé posé pour rien"
+    print("Confirmation d'échec -- cooldown ET GCD libérés, l'ability redevient immédiatement pressable.")
+
+
+def test_press_confirmation_failure_does_not_clobber_a_newer_press():
+    """Course évitée par le compare-and-clear (cf. docstring __init__) :
+    une confirmation d'échec TARDIVE pour une VIEILLE presse ne doit jamais
+    écraser le cooldown/GCD d'une presse PLUS RÉCENTE de la même ability,
+    posé entre-temps."""
+    ability = Ability(name="dawnbreaker_orb", cooldown_ms=9970, skip_detection=True)
+
+    def hook(state):
+        return [Intent(ability="dawnbreaker_orb", weight=90, source="test_hook")]
+
+    engine = RotationEngine(
+        abilities=[ability], state=CombatState(mode="st"),
+        press_fn=lambda name: None, is_ready_fn=lambda name, threshold=None: True,
+        pre_tick_hook=hook,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
+    )
+    engine.tick()   # 1re presse -- réussira (confirmation jamais reçue avant la 2e presse ci-dessous)
+    engine.state.gcd_until = 0.0   # neutralise le GCD pour forcer une 2e vraie presse tout de suite
+    engine.tick()   # 2e presse -- pose un NOUVEAU cooldown/GCD, plus récent
+    newer_cooldown = engine.state.cooldown_until["dawnbreaker_orb"]
+    newer_gcd = engine.state.gcd_until
+
+    # La confirmation d'échec de la 1re presse arrive SEULEMENT MAINTENANT (tardive, réaliste vu le thread séparé).
+    engine.report_press_outcome("dawnbreaker_orb", False, time.monotonic())
+    engine._reconcile_press_outcomes(time.monotonic())
+
+    assert engine.state.cooldown_until["dawnbreaker_orb"] == newer_cooldown, (
+        "la confirmation tardive de la 1re presse ne doit PAS écraser le cooldown de la 2e, plus récente"
+    )
+    assert engine.state.gcd_until == newer_gcd, "idem pour le GCD -- la 2e presse reste légitimement verrouillée"
+    print("Confirmation tardive d'une vieille presse -- ne casse jamais le verrou d'une presse plus récente.")
+
+
+def test_reconciliation_runs_before_the_next_tick_decision():
+    """La réconciliation doit avoir lieu EN TOUT DÉBUT de tick() -- une
+    confirmation d'échec reçue entre deux ticks doit être visible à la
+    décision du tick SUIVANT, pas un tick plus tard."""
+    ability = Ability(name="dawnbreaker_orb", cooldown_ms=9970, skip_detection=True)
+    seen_cooldown_states: list[bool] = []
+
+    def hook(state):
+        seen_cooldown_states.append(state.is_on_cooldown("dawnbreaker_orb", time.monotonic()))
+        return [Intent(ability="dawnbreaker_orb", weight=90, source="test_hook")]
+
+    engine = RotationEngine(
+        abilities=[ability], state=CombatState(mode="st"),
+        press_fn=lambda name: None, is_ready_fn=lambda name, threshold=None: True,
+        pre_tick_hook=hook,
+        off_gcd_hook_abilities=frozenset({"fighting_techniques"}),
+    )
+    engine.tick()
+    engine.state.gcd_until = 0.0   # neutralise le GCD -- seul le cooldown nous intéresse ici
+    engine.report_press_outcome("dawnbreaker_orb", False, time.monotonic())
+    engine.tick()   # la réconciliation doit tourner AVANT que le hook (donc seen_cooldown_states) ne soit appelé
+
+    assert seen_cooldown_states == [False, False], (
+        f"le hook du 2e tick doit voir le cooldown déjà libéré, reçu {seen_cooldown_states!r}"
+    )
+    print("Réconciliation en tout début de tick() -- une confirmation d'échec est visible dès le tick suivant.")
+
+
 if __name__ == "__main__":
+    test_expired_meiko_detection_blocks_every_decision()
     test_default_opens_when_buffs_missing()
     test_default_picks_whichever_buff_is_missing()
     test_three_stacks_forces_vortex_even_if_strikes_is_missing()
@@ -925,4 +1213,12 @@ if __name__ == "__main__":
     test_earthfist_barrage_fires_again_when_one_orb_still_remains()
     test_intent_target_triggers_a_target_select_press_before_the_ability()
     test_intent_without_target_presses_only_the_ability_unchanged()
+    test_hook_won_ability_records_its_real_cooldown_not_zero()
+    test_hook_won_name_not_in_abilities_still_records_zero_cooldown()
+    test_shutdown_calls_shutdown_fn_when_provided()
+    test_shutdown_is_a_no_op_without_shutdown_fn()
+    test_press_confirmation_success_is_a_no_op()
+    test_press_confirmation_failure_rolls_back_cooldown_and_gcd()
+    test_press_confirmation_failure_does_not_clobber_a_newer_press()
+    test_reconciliation_runs_before_the_next_tick_decision()
     print("\nTous les tests passent.")

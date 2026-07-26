@@ -1,0 +1,164 @@
+# =============================================================================
+# helena.yaml — rotation Helena (Guardian tank), build Season 3 (chaîne CDR
+# Veteran of War). Traduit depuis une spec externe (helena.yaml fournie par
+# l'utilisateur, dialecte "builds: {default/season3/defensive/leveling}") vers le
+# VRAI dialecte lu par wardenbot/engine.py::load_abilities -- cf. décision du
+# 2026-07-18.
+#
+# CE QUI N'A PAS ÉTÉ REPRIS TEL QUEL DE LA SPEC FOURNIE, ET POURQUOI :
+#   - `builds:` (plusieurs rotations nommées dans un seul fichier) : n'existe
+#     PAS dans engine.py::load_abilities (qui lit uniquement `abilities:` +
+#     `sequences:` au niveau racine). Un seul build par fichier YAML, comme
+#     warden.yaml/tariq.yaml/vigour.yaml. Seul le build "season3" (le méta
+#     actuel d'après la spec fournie, "default" y étant explicitement labellé
+#     fallback pré-Season-3) est traduit ici. Si les 3 autres variantes
+#     (default/defensive/leveling) doivent être sélectionnables un jour, elles
+#     devront devenir des fichiers séparés (config/helena_defensive.yaml, etc.)
+#     + entrées CHARACTERS dédiées dans game_config.py -- pas fait ici, pas
+#     demandé.
+#   - `resource_name`/`resource_max` au niveau racine : n'existe pas non plus
+#     comme clé lue par load_abilities. La Toughness est exposée comme une
+#     ressource nommée dans state.resources["toughness"] (même mécanisme que
+#     stormfall/earthfall pour Meiko, fury pour Tariq), lue via le token de
+#     condition `toughness_above:N` ajouté dans engine.py::_eval_token
+#     (2026-07-18) -- PAS un champ YAML.
+#   - `condition: not mana_above:40` (shields_up, spec fournie) : `mana_above`
+#     n'est PAS un token reconnu par _eval_token (aurait levé
+#     `ValueError: Condition inconnue` au premier tick). Corrigé en
+#     `not toughness_above:40`, le token réellement ajouté pour ce personnage.
+#   - `burst_sequence:` (siegebreaker/sweeping_strike/shockwave/charge) :
+#     aucune trace de cette clé dans engine.py -- ne correspond pas au bloc
+#     `sequences:` réel (qui décrit des enchaînements PASSIFS déclenchés par
+#     condition, cf. warden.yaml, pas un déclenchement manuel façon "burst
+#     button"). Omis ici plutôt qu'inventé ; à concevoir pour de vrai si
+#     l'utilisateur veut un vrai déclenchement de burst.
+#   - `is_ready_fn` / `base_weight` / `weight_modifiers` / `conditions: [...]`
+#     (d'un message de config DIFFÉRENT, pas cette spec) : n'existent nulle
+#     part dans le moteur (Ability est un dataclass strict, `Ability(**a)` --
+#     toute clé inconnue fait planter le chargement). Le vrai système de poids
+#     (Intent.weight, 90=hook/80=séquence/50=scan, cf. engine.py) ne s'applique
+#     PAS aux abilities individuelles du bloc `abilities:` -- ignoré ici.
+#
+# 2026-07-19, REVIRÉ SUR DEMANDE EXPLICITE DE L'UTILISATEUR : Shield Throw (+ son proc)
+# entre dans l'auto-rotation -- la spec d'origine la laissait manuelle ("ranged,
+# risque de pull involontaire"), l'utilisateur a explicitement demandé
+# l'inverse. Reste MANUEL, non demandé : Charge (gap-closer + stun, timing au
+# joueur) -- sa contribution de CDR (Shield Slam/Shield Throw/Shields Up/
+# Shockwave -6s chacun) reste donc invisible au bot, gap documenté dans
+# hooks.py::HELENA_CDR_MS plutôt que caché.
+#
+# CD RÉELS AJOUTÉS 2026-07-19 (donnés par l'utilisateur, mesurés en jeu) :
+# hold_the_line=30000ms, shockwave=29870ms, sweeping_strike=30000ms (déjà
+# correct). Avant ce changement, hold_the_line/shockwave n'avaient AUCUN
+# cooldown_ms -- seule la détection template les gatait, d'où le spam observé
+# (détection peu fiable en l'absence de confirmation visuelle nette).
+#
+# CE QUI RESTE À FAIRE AVANT QUE ÇA TOURNE PARFAITEMENT EN JEU :
+#   1. Valider en jeu que les templates capturés (shields_up, sweeping_strike,
+#      shockwave, shield_slam, hold_the_line, power_strike, shield_throw)
+#      matchent bien au-dessus du seuil 0.70 (jamais confirmé avec
+#      detect_check.py à ce stade).
+#   2. Toughness bar câblée (make_helena_state_update_fn, 2026-07-19) mais la
+#      couleur de remplissage (HELENA_TOUGHNESS_BAR_FILL_BGR, cf.
+#      state_update.py) a été mesurée sur une vidéo où la barre restait
+#      quasi pleine tout du long -- AUCUNE lecture partielle/basse n'a encore
+#      confirmé que le pourcentage réel est bien suivi. À valider dès qu'un
+#      moment de Toughness visiblement entamée est capturé (même réserve que
+#      mana_bar côté Vigour à son époque).
+#
+# CDR Veteran of War RÉELLEMENT modélisée par ce build (cf. hooks.py::
+# helena_post_tick/HELENA_CDR_MS, uniquement les relations où LES DEUX
+# abilities sont auto-castées par CE fichier, donc observables par le bot) :
+#   Measured Strike -> Shield Slam (-1.5s), Shield Throw (-1.5s)
+#   Power Strike     -> Shield Slam (-1.5s), Shield Throw (-1.5s)
+#   Shield Slam       -> Shockwave (-3.0s)
+#   Shield Throw       -> Shockwave (-3.0s)
+#   Shield Throw Proc  -> Shockwave (-3.0s)  (c'est toujours un cast de Shield Throw)
+#   Shockwave         -> Shields Up (-6.0s)
+#   Hold the Line      -> Shield Slam (RESET COMPLET, pas une réduction -- cf.
+#                          helena_post_tick, cas spécial distinct de la table)
+# =============================================================================
+
+class_name: helena
+build_name: season3
+display_name: "Helena (Guardian) — Season 3"
+
+gcd_ms: 1500
+
+abilities:
+  # Off-GCD : Shields Up -- +60% Toughness / +25% Bloc 12s, 2 charges/30s.
+  # Charge-based (comme shield_slam côté Meiko/Tariq) : cooldown_ms:1, la
+  # disponibilité réelle est portée par le template (icône grisée/allumée),
+  # pas par ce cooldown fictif. Condition : sous 40% Toughness (cf. gap de
+  # détection documenté en tête de fichier).
+  - name: shields_up
+    priority_st: 0
+    priority_aoe: 0
+    off_gcd: true
+    cooldown_ms: 1
+    condition: "not toughness_above:40"
+
+  # GCD : Sweeping Strike -- 30s CD fixe, priorité de dégâts la plus haute.
+  - name: sweeping_strike
+    priority_st: 1
+    priority_aoe: 1
+    cooldown_ms: 30000
+
+  # GCD : Shockwave -- 29.87s CD réel (mesuré par l'utilisateur, 2026-07-19),
+  # fortement réduit par la chaîne CDR (Shield Slam/Shield Throw -3s chacun).
+  - name: shockwave
+    priority_st: 2
+    priority_aoe: 2
+    cooldown_ms: 29870
+
+  # GCD : Shield Slam -- 2 charges/7.5s recharge (Haste = CDR), charge-based.
+  - name: shield_slam
+    priority_st: 3
+    priority_aoe: 3
+    cooldown_ms: 1
+
+  # GCD : Shield Throw (PROC) -- version empowered/glowy (block-reset), gratuite
+  # et à consommer avant Shield Throw normal. skip_detection:true + condition
+  # sur le flag de front montant (hooks:shield_throw_proc_ready, cf.
+  # helena_pre_tick) : MÊME schéma que hammer_storm_proc/skull_crusher_proc
+  # côté Tariq -- la détection fiable est le buff (shield_throw_proc sur
+  # helena_buff_bar), pas l'icône de la barre de sorts. Partage la même touche
+  # que shield_throw (cf. profiles/*/config.json).
+  - name: shield_throw_proc
+    priority_st: 4
+    priority_aoe: 4
+    skip_detection: true
+    cooldown_ms: 1
+    condition: "hooks:shield_throw_proc_ready"
+
+  # GCD : Shield Throw -- 21s CD, ranged, bounces to 5 targets, CDR pour
+  # Shockwave. AUTO-CASTÉE depuis le 2026-07-19 (demande explicite de
+  # l'utilisateur -- la spec d'origine la laissait manuelle, cf. tête de fichier).
+  - name: shield_throw
+    priority_st: 5
+    priority_aoe: 5
+    cooldown_ms: 21000
+
+  # Off-GCD : Hold the Line -- RESET COMPLET du cooldown de Shield Slam (pas
+  # une réduction partielle, cf. helena_post_tick) + empower absorb. 30s CD
+  # réel (donné par l'utilisateur, 2026-07-19).
+  - name: hold_the_line
+    priority_st: 6
+    priority_aoe: 6
+    off_gcd: true
+    cooldown_ms: 30000
+
+  # GCD : Power Strike -- 6s CD, CDR pour Shield Slam ET Shield Throw.
+  - name: power_strike
+    priority_st: 7
+    priority_aoe: 7
+    cooldown_ms: 6000
+
+  # GCD : Measured Strike -- filler sans CD réel, dernier recours.
+  # skip_detection:true : pas besoin de template, toujours pressable si rien
+  # d'autre n'est prêt (même convention que measured_strike côté spec fournie).
+  - name: measured_strike
+    priority_st: 8
+    priority_aoe: 8
+    cooldown_ms: 1500
+    skip_detection: true

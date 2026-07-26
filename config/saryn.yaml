@@ -1,0 +1,88 @@
+# =============================================================================
+# saryn.yaml — assistant Saryn Prime (Warframe), PAS un moteur de rotation
+# complet comme les persos Fellowship -- l'utilisateur gère lui-même visée,
+# déplacement, et son 3e sort. Ce build presse UNIQUEMENT 2 sorts précis
+# (Toxic Lash, Nourish) quand leur buff a expiré ET que l'Énergie est
+# suffisante -- il ne joue jamais à la place du joueur (cf. discussion CGU
+# Warframe, 2026-07-20 : automatisation COMPLÈTE interdite selon les
+# discussions communautaires trouvées, macro assistée tolérée -- ce scope
+# reste du côté toléré, décision de l'utilisateur après avoir vu le risque).
+#
+# PREMIER PERSONNAGE HORS FELLOWSHIP (2026-07-20) -- confirme que
+# RotationEngine/Ability/CombatState sont bien génériques (rien dans
+# engine.py n'est spécifique à Fellowship) : seule la donnée (ce YAML,
+# hooks.py, state_update.py, profiles/*/config.json) change de jeu.
+#
+# MÉCANIQUE (confirmée par l'utilisateur, 2026-07-20, captures d'écran à
+# l'appui) :
+#   - Toxic Lash (touche 3) : buff de dégâts Toxin, dure 37.12s à ce rang de
+#     mods (Drain 50 Énergie). L'icône affiche un décompte en secondes
+#     pendant qu'il est actif -- MÊME mécanique que Spirited Strikes chez
+#     Meiko (cf. wardenbot/ocr.py::read_countdown_seconds).
+#   - Nourish (touche 4) : capacité Helminth greffée sur Saryn (remplace une
+#     des 4 capacités d'origine -- tooltip "ALTERED: Self-Heal Removed and
+#     Effect Reduced", confirmé par capture d'écran). Dure 20.62s à ce rang
+#     de mods (Drain 50 Énergie), même mécanique de décompte sur l'icône.
+#   - Aucun des deux n'a de cooldown au sens Fellowship -- recastable dès que
+#     l'Énergie suffit, MAIS ne doit être pressé QUE si le buff est retombé
+#     (sinon on gâche de l'Énergie à rafraîchir un buff déjà actif).
+#   - Garde-fou Énergie (donné par l'utilisateur) : ne JAMAIS presser l'un des
+#     deux sorts sous 200 d'Énergie -- marge de sécurité au-dessus du coût de
+#     chaque sort (Drain 50 chacun) pour ne jamais se vider complètement et
+#     rester sans Énergie pour le reste du kit (géré manuellement).
+#
+# PAS DE GCD FELLOWSHIP ICI : Warframe n'a pas de verrou "un seul sort par
+# seconde" entre capacités différentes comme le GCD de tank Fellowship --
+# Toxic Lash et Nourish sont indépendants, tous les deux off_gcd pour ne
+# jamais se bloquer l'un l'autre. gcd_ms ci-dessous n'est donc jamais
+# réellement appliqué ici (aucune ability non-off_gcd dans ce fichier) --
+# gardé à une valeur symbolique basse plutôt que supprimé (le moteur
+# s'attend à une valeur, cf. RotationEngine).
+#
+# cooldown_ms:2000 (PAS un vrai cooldown de jeu) : garde-fou anti
+# double-presse -- l'Énergie et les décomptes sont lus par OCR sur un thread
+# dédié, throttlé (cf. make_saryn_state_update_fn, state_update.py, OCR
+# nettement plus coûteux qu'un template match, cf. wardenbot/ocr.py). Après
+# une presse, buff:X_active ne repassera à True qu'au PROCHAIN cycle OCR
+# (quelques centaines de ms plus tard), pas au tick suivant -- sans ce petit
+# cooldown, le scan pourrait represser la même touche plusieurs fois de
+# suite pendant ce court délai de rattrapage.
+#
+# CE QUI RESTE À FAIRE AVANT QUE ÇA TOURNE EN JEU (aucune capture Warframe à
+# ce stade) :
+#   1. Capturer les 3 régions (icône Toxic Lash, icône Nourish, nombre
+#      d'Énergie) via capture_helper.py mark/snap -- cf.
+#      wardenbot/game_config.py CHARACTERS["saryn"].
+#   2. Valider que read_countdown_seconds/read_digits (wardenbot/ocr.py)
+#      lisent bien ces 3 régions en jeu réel -- jamais testé sur l'UI
+#      Warframe à ce stade, seulement sur l'UI Fellowship (Meiko/Tariq).
+#   3. Confirmer les touches de ciblage/déplacement ne sont jamais touchées
+#      par ce build -- volontairement absent de ce fichier, l'utilisateur
+#      garde la main dessus.
+# =============================================================================
+
+class_name: saryn
+build_name: warframe_assist
+display_name: "Saryn Prime — Assistant Toxic Lash / Nourish"
+
+gcd_ms: 100
+
+abilities:
+  # Touche 3 : Toxic Lash -- recast si le buff est retombé (décompte
+  # absent/à 0, cf. state.buffs["toxic_lash_active"]) ET Énergie >= 200.
+  - name: toxic_lash
+    priority_st: 0
+    priority_aoe: 0
+    off_gcd: true
+    skip_detection: true
+    cooldown_ms: 2000
+    condition: "not buff:toxic_lash_active, energy_above:200"
+
+  # Touche 4 : Nourish (Helminth) -- même logique, décompte propre (20.62s).
+  - name: nourish
+    priority_st: 1
+    priority_aoe: 1
+    off_gcd: true
+    skip_detection: true
+    cooldown_ms: 2000
+    condition: "not buff:nourish_active, energy_above:200"

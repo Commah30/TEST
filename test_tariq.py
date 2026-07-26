@@ -15,6 +15,7 @@ import numpy as np
 
 from wardenbot.bar_reader import read_fill_pct
 from wardenbot.engine import Ability, CombatState, RotationEngine, evaluate_condition, load_abilities
+from wardenbot.freshness import DetectionMeta
 from wardenbot.hooks import (
     BURST_PREP_WINDOW_S,
     BURST_TIMEOUT_MARGIN_S,
@@ -24,6 +25,104 @@ from wardenbot.hooks import (
     tariq_pre_tick,
     tariq_post_tick,
 )
+from wardenbot.state_update import (
+    TARIQ_BUFF_CLASS_TO_KEY,
+    TARIQ_BUFF_CONF_HIGH,
+    TARIQ_BUFF_CONF_LOW,
+    apply_buff_hysteresis,
+)
+
+
+def _fresh(state: CombatState) -> CombatState:
+    """Marque `state` comme ayant des lectures tariq_yolo/tariq_bars fraîches
+    -- nécessaire depuis l'ajout du gate de fraîcheur (audit architecture,
+    2026-07-17, cf. hooks.py::_tariq_pre_tick_impl, décision Focused Wrath)
+    pour que ces tests continuent d'exercer la vraie logique de décision
+    plutôt que de se faire bloquer par le gate lui-même."""
+    now = time.monotonic()
+    state.detection_meta["tariq_yolo"] = DetectionMeta(created_at=now)
+    state.detection_meta["tariq_bars"] = DetectionMeta(created_at=now)
+    return state
+
+
+# =============================================================================
+# apply_buff_hysteresis (2026-07-19) -- BUG TROUVÉ EN JEU (rapporté par
+# l'utilisateur) : hammer_storm_proc pressé sans proc visible, MÊME après le
+# fix d'expiration à 30s -- debug.log montrait des absences de 0.7s à 10.7s
+# PENDANT que le buff (durée réelle 30s, confirmée) était censé encore actif.
+# Solution : seuil de confiance asymétrique (recherché -- technique standard
+# de stabilisation temps réel pour ce type de scintillement de détection).
+# =============================================================================
+
+def test_hysteresis_high_confidence_activates_from_inactive():
+    found = {"hammer_storm_buff": TARIQ_BUFF_CONF_HIGH}
+    last_active = {k: False for k in TARIQ_BUFF_CLASS_TO_KEY.values()}
+    apply_buff_hysteresis(found, last_active, TARIQ_BUFF_CLASS_TO_KEY)
+    assert last_active["hammer_storm_empowered"] is True
+    print("Confiance >= seuil HAUT depuis inactif -> s'active.")
+
+
+def test_hysteresis_mid_confidence_does_not_activate_from_inactive():
+    """Le coeur du fix : une confiance ENTRE les deux seuils (0.20-0.40) ne
+    doit PAS armer le buff si on partait d'inactif -- sinon on retombe sur
+    l'ancien comportement (un seul seuil), et on réintroduit exactement le
+    risque de faux positif que le seuil HAUT existant (0.4) était censé
+    éviter (cf. commentaire hammer_storm_buff/skull_crusher_buff confondus,
+    2026-07-12)."""
+    confidence = (TARIQ_BUFF_CONF_LOW + TARIQ_BUFF_CONF_HIGH) / 2
+    found = {"hammer_storm_buff": confidence}
+    last_active = {k: False for k in TARIQ_BUFF_CLASS_TO_KEY.values()}
+    apply_buff_hysteresis(found, last_active, TARIQ_BUFF_CLASS_TO_KEY)
+    assert last_active["hammer_storm_empowered"] is False
+    print("Confiance intermédiaire depuis inactif -> ne s'active PAS (seuil haut requis).")
+
+
+def test_hysteresis_mid_confidence_keeps_active_state():
+    """L'AUTRE moitié du fix, celle qui corrige le bug rapporté : une fois
+    actif, une confiance intermédiaire (chute ponctuelle -- repositionnement
+    dans la buff bar dynamique, occultation) NE DOIT PAS faire lire le buff
+    comme parti alors qu'il est toujours actif en jeu (durée réelle 30s)."""
+    confidence = (TARIQ_BUFF_CONF_LOW + TARIQ_BUFF_CONF_HIGH) / 2
+    found = {"hammer_storm_buff": confidence}
+    last_active = {k: False for k in TARIQ_BUFF_CLASS_TO_KEY.values()}
+    last_active["hammer_storm_empowered"] = True  # déjà actif au cycle précédent
+    apply_buff_hysteresis(found, last_active, TARIQ_BUFF_CLASS_TO_KEY)
+    assert last_active["hammer_storm_empowered"] is True
+    print("Confiance intermédiaire alors que déjà actif -> reste actif (absorbe la chute ponctuelle).")
+
+
+def test_hysteresis_below_low_threshold_deactivates():
+    found = {"hammer_storm_buff": TARIQ_BUFF_CONF_LOW - 0.05}
+    last_active = {k: False for k in TARIQ_BUFF_CLASS_TO_KEY.values()}
+    last_active["hammer_storm_empowered"] = True
+    apply_buff_hysteresis(found, last_active, TARIQ_BUFF_CLASS_TO_KEY)
+    assert last_active["hammer_storm_empowered"] is False
+    print("Confiance sous le seuil BAS -> se désactive (le buff est vraiment parti).")
+
+
+def test_hysteresis_missing_class_treated_as_zero_confidence():
+    """found ne contient PAS la classe (aucune boîte au-dessus de
+    TARIQ_BUFF_CONF_LOW, cf. detect()) -- doit se comporter comme confiance
+    0.0, pas lever de KeyError."""
+    found: dict = {}
+    last_active = {k: False for k in TARIQ_BUFF_CLASS_TO_KEY.values()}
+    last_active["hammer_storm_empowered"] = True
+    apply_buff_hysteresis(found, last_active, TARIQ_BUFF_CLASS_TO_KEY)
+    assert last_active["hammer_storm_empowered"] is False
+    print("Classe absente de found -> traitée comme confiance nulle, désactive proprement.")
+
+
+def test_hysteresis_tracks_the_three_buffs_independently():
+    """Un seul buff détecté (fort) ne doit ni activer ni affecter les deux
+    autres -- même principe que test_the_two_proc_flags_are_tracked_independently
+    côté rising-edge."""
+    found = {"hammer_storm_buff": TARIQ_BUFF_CONF_HIGH}
+    last_active = {k: False for k in TARIQ_BUFF_CLASS_TO_KEY.values()}
+    apply_buff_hysteresis(found, last_active, TARIQ_BUFF_CLASS_TO_KEY)
+    assert last_active["hammer_storm_empowered"] is True
+    assert last_active["skull_crusher_empowered"] is False
+    assert last_active["focused_wrath_empowered"] is False
+    print("Les 3 buffs restent indépendants -- un seul détecté n'affecte pas les autres.")
 
 
 def test_ready_flag_arms_only_on_rising_edge():
@@ -138,6 +237,82 @@ def test_single_frame_noise_does_not_rearm_ready_flag():
     tariq_pre_tick(state)
     assert state.hooks["hammer_storm_proc_ready"] is False, "1 seul tick d'absence ne doit pas suffire à réarmer (bruit, pas un vrai proc)"
     print("1 tick de bruit isolé ne réarme pas ready -- filtré comme prévu.")
+
+
+def test_ready_expires_after_the_real_proc_duration():
+    """BUG TROUVÉ EN JEU (rapporté par l'utilisateur, 2026-07-19) : ready
+    restait consommable indéfiniment une fois armé, tant qu'aucun vrai cast
+    n'était confirmé -- cf. debug.log (session 16:52-17:15), 11/119 presses
+    hammer_storm_proc réelles avec le buff déjà lu absent depuis 33 à 1120
+    ticks (~0.5s à ~18.7s à 60Hz). TARIQ_PROC_EXPIRE_S (30s, durée réelle
+    confirmée par l'utilisateur) doit effacer ready s'il traîne plus
+    longtemps que ça sans être consommé."""
+    from wardenbot.hooks import TARIQ_PROC_EXPIRE_S
+    state = CombatState()
+
+    state.buffs["hammer_storm_empowered"] = True
+    tariq_pre_tick(state)
+    assert state.hooks["hammer_storm_proc_ready"] is True
+
+    # simule un armement vieux de TARIQ_PROC_EXPIRE_S + 1s, jamais consommé
+    # -- reproduit un fury_above:55 qui a mis longtemps à être atteint.
+    state.hooks["_hammer_storm_proc_ready_armed_at"] = time.monotonic() - (TARIQ_PROC_EXPIRE_S + 1.0)
+    tariq_pre_tick(state)
+    assert state.hooks["hammer_storm_proc_ready"] is False, "ready aurait dû expirer après TARIQ_PROC_EXPIRE_S"
+    print(f"ready expire bien après {TARIQ_PROC_EXPIRE_S}s sans consommation (bug 'hammer storm sans proc' corrigé).")
+
+
+def test_ready_does_not_expire_before_the_real_proc_duration():
+    """Contre-partie : un ready encore DANS sa fenêtre de 30s réelle ne doit
+    PAS être effacé prématurément -- sinon des procs légitimes seraient
+    perdus juste parce que le bot a mis un peu de temps à réagir."""
+    from wardenbot.hooks import TARIQ_PROC_EXPIRE_S
+    state = CombatState()
+
+    state.buffs["hammer_storm_empowered"] = True
+    tariq_pre_tick(state)
+    assert state.hooks["hammer_storm_proc_ready"] is True
+
+    state.hooks["_hammer_storm_proc_ready_armed_at"] = time.monotonic() - (TARIQ_PROC_EXPIRE_S - 1.0)
+    tariq_pre_tick(state)
+    assert state.hooks["hammer_storm_proc_ready"] is True, "ready ne doit pas expirer avant TARIQ_PROC_EXPIRE_S"
+    print("ready reste vrai tant que la fenêtre de 30s n'est pas dépassée -- pas de perte de proc légitime.")
+
+
+def test_skull_crusher_proc_ready_also_expires():
+    """Même mécanisme appliqué aux DEUX procs de TARIQ_PROC_BUFFS (boucle
+    générique, cf. commentaire de TARIQ_PROC_EXPIRE_S dans hooks.py) --
+    vérifie que skull_crusher_proc_ready expire aussi, pas seulement
+    hammer_storm_proc_ready. Durée réelle confirmée par l'utilisateur
+    UNIQUEMENT pour Hammer Storm, étendue ici par analogie (cf. hooks.py)."""
+    from wardenbot.hooks import TARIQ_PROC_EXPIRE_S
+    state = CombatState()
+
+    state.buffs["skull_crusher_empowered"] = True
+    tariq_pre_tick(state)
+    assert state.hooks["skull_crusher_proc_ready"] is True
+
+    state.hooks["_skull_crusher_proc_ready_armed_at"] = time.monotonic() - (TARIQ_PROC_EXPIRE_S + 1.0)
+    tariq_pre_tick(state)
+    assert state.hooks["skull_crusher_proc_ready"] is False
+    print("skull_crusher_proc_ready expire aussi (même boucle générique que hammer_storm_proc_ready).")
+
+
+def test_consuming_the_proc_well_before_expiration_still_works_normally():
+    """Non-régression : un proc consommé normalement, bien avant les 30s,
+    continue de fonctionner exactement comme avant ce fix (cf.
+    test_stuck_active_reading_does_not_rearm_after_consumption, même
+    séquence de confirmation)."""
+    state = CombatState()
+
+    state.buffs["hammer_storm_empowered"] = True
+    tariq_pre_tick(state)
+    assert state.hooks["hammer_storm_proc_ready"] is True
+    tariq_post_tick(state, "hammer_storm_proc")
+    state.detection["hammer_storm_casting"] = True
+    tariq_pre_tick(state)
+    assert state.hooks["hammer_storm_proc_ready"] is False
+    print("Consommation normale (bien avant 30s) : comportement inchangé par le fix d'expiration.")
 
 
 def test_skull_crusher_proc_mirrors_hammer_storm_pattern():
@@ -342,6 +517,31 @@ def test_hammer_storm_proc_fires_on_any_single_proc():
     print("hammer_storm_proc part bien sans focused_wrath_empowered -- OK.")
 
 
+def test_expired_tariq_detection_blocks_focused_wrath_discount():
+    """FRAÎCHEUR (audit architecture, 2026-07-17) : tariq_yolo/tariq_bars
+    absents ou périmés -> la décision Focused Wrath (seuil réduit) ne doit
+    RIEN presser, même avec toutes les conditions normalement réunies
+    (buff actif, ready, Fury suffisante) -- agir sur un fury_pct/ready
+    potentiellement gelés serait pire que de laisser passer un tick sans
+    proc. Le reste de _tariq_pre_tick_impl (planner, confirmations,
+    hard_lock, front montant) continue de tourner -- seule la décision
+    finale est bloquée, cf. hooks.py."""
+    never_read = CombatState()   # detection_meta jamais rempli
+    never_read.buffs["focused_wrath_empowered"] = True
+    never_read.hooks["hammer_storm_proc_ready"] = True
+    never_read.resources["fury"] = 0.35
+    assert tariq_pre_tick(never_read) == [], "tariq_yolo/tariq_bars jamais lus -- aucune décision"
+
+    stale = CombatState()
+    stale.buffs["focused_wrath_empowered"] = True
+    stale.hooks["hammer_storm_proc_ready"] = True
+    stale.resources["fury"] = 0.35
+    stale.detection_meta["tariq_yolo"] = DetectionMeta(created_at=time.monotonic() - 5.0)
+    stale.detection_meta["tariq_bars"] = DetectionMeta(created_at=time.monotonic() - 5.0)
+    assert tariq_pre_tick(stale) == [], "tariq_yolo/tariq_bars périmés (5s, largement EXPIRED) -- aucune décision"
+    print("tariq_yolo/tariq_bars absents ou périmés -- la décision Focused Wrath ne presse rien.")
+
+
 def test_focused_wrath_discount_fires_hammer_storm_below_normal_threshold():
     """BUG TROUVÉ EN JEU (2026-07-12), signalé par l'utilisateur et vérifié sur
     fellowship.wiki.fextralife.com/Focused+Wrath : Focused Wrath réduit de
@@ -352,7 +552,7 @@ def test_focused_wrath_discount_fires_hammer_storm_below_normal_threshold():
     hooks.py, marge ajoutée le 2026-07-13) + focused_wrath_empowered actif ->
     doit quand même partir, sinon le bot croit ne pas avoir assez de Fury
     pour un proc qu'il peut réellement se permettre."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.buffs["focused_wrath_empowered"] = True
     state.hooks["hammer_storm_proc_ready"] = True
     state.resources["fury"] = 0.35
@@ -367,7 +567,7 @@ def test_focused_wrath_discount_fires_hammer_storm_below_normal_threshold():
 def test_focused_wrath_discount_does_not_fire_below_discounted_threshold():
     """Même le seuil RÉDUIT doit rester respecté -- Focused Wrath ne rend pas
     le proc gratuit, juste moins cher."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.buffs["focused_wrath_empowered"] = True
     state.hooks["hammer_storm_proc_ready"] = True
     state.resources["fury"] = 0.10
@@ -380,7 +580,7 @@ def test_focused_wrath_discount_does_not_fire_below_discounted_threshold():
 def test_focused_wrath_discount_fires_skull_crusher_below_normal_threshold():
     """Même mécanisme que Hammer Storm -- Focused Wrath réduit aussi le coût
     de Skull Crusher (2 charges partagées entre les deux abilities)."""
-    state = CombatState()
+    state = _fresh(CombatState())
     state.buffs["focused_wrath_empowered"] = True
     state.hooks["skull_crusher_proc_ready"] = True
     state.resources["fury"] = 0.15
@@ -444,9 +644,16 @@ def test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry():
     retombe pas -- Hammer Storm restait bloqué indéfiniment.
 
     Fix : ready ne doit RESTER effacé que si hammer_storm_casting (cast bar,
-    vérité terrain) confirme une vraie canalisation dans la fenêtre qui suit
-    la presse. Sans confirmation, ready doit rester tel quel (True) pour que
-    le prochain tick retente naturellement."""
+    vérité terrain) confirme une vraie canalisation. Sans confirmation, ready
+    doit rester tel quel (True) pour que le prochain tick retente naturellement.
+
+    MODIFIÉ (2026-07-20, cf. bug du même nom "corrélé debug.log") : _pending
+    ne s'efface PLUS sur simple expiration de la fenêtre -- il reste vrai
+    (on continue d'écouter une confirmation tardive) tant qu'aucune vraie
+    canalisation n'est détectée. Ce test avance le temps bien AU-DELÀ de la
+    fenêtre pour prouver que ready ET _pending restent inchangés en l'absence
+    de toute confirmation, aussi longtemps qu'on veut (dans les limites de
+    TARIQ_PROC_EXPIRE_S, testé séparément)."""
     from wardenbot.hooks import HAMMER_STORM_PROC_CONFIRM_WINDOW_S
 
     state = CombatState()
@@ -460,7 +667,8 @@ def test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry():
 
     # Le jeu ne démarre JAMAIS de canalisation (Fury réelle insuffisante) --
     # hammer_storm_casting reste False tout du long. On avance le temps
-    # au-delà de la fenêtre de confirmation sans jamais poser casting=True.
+    # au-delà de l'ancienne fenêtre de confirmation sans jamais poser
+    # casting=True.
     state.hooks["_hammer_storm_proc_pending_since"] -= (HAMMER_STORM_PROC_CONFIRM_WINDOW_S + 0.1)
     tariq_pre_tick(state)
 
@@ -468,8 +676,73 @@ def test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry():
         "un press qui n'a mené à AUCUNE canalisation réelle ne doit pas "
         "consommer le proc -- sinon le bot croit à tort l'avoir utilisé"
     )
-    assert state.hooks["_hammer_storm_proc_pending"] is False, "le marqueur d'attente doit être levé une fois la fenêtre expirée"
-    print("Press sans canalisation réelle confirmée -> ready reste True, retente possible au tick suivant.")
+    assert state.hooks["_hammer_storm_proc_pending"] is True, (
+        "_pending doit rester vrai (2026-07-20) -- on continue d'écouter une "
+        "confirmation tardive plutôt que d'abandonner à la première fenêtre expirée"
+    )
+    print("Press sans canalisation réelle confirmée -> ready ET _pending restent vrais, on continue d'écouter.")
+
+
+def test_hammer_storm_proc_late_confirmation_still_clears_ready():
+    """LE BUG CORRIGÉ (rapporté par l'utilisateur, 2026-07-20, corrélé
+    précisément avec debug.log d'une session réelle) : la canalisation
+    démarre VRAIMENT, mais est détectée un peu APRÈS l'ancienne fenêtre de
+    0.5s (ex. pendant un stall multi-secondes du worker de détection, cf.
+    capture_watchdog.log) -- avec l'ANCIEN code, la fenêtre expirée effaçait
+    _pending avant que la vraie confirmation n'arrive, donc ready restait
+    bloqué à True indéfiniment malgré un cast réellement consommé. Observé
+    en jeu : hammer_storm_proc repart plusieurs fois sur le MÊME proc déjà
+    dépensé, sans buff empowered actif -- exactement le symptôme rapporté.
+
+    Ce test simule précisément ce scénario : press -> fenêtre "expirée" (mais
+    _pending doit maintenant rester vrai, cf. test précédent) -> la
+    canalisation démarre ENFIN, tard -> ready doit être effacé quand même."""
+    from wardenbot.hooks import HAMMER_STORM_PROC_CONFIRM_WINDOW_S
+
+    state = CombatState()
+    state.buffs["hammer_storm_empowered"] = True
+    tariq_pre_tick(state)
+    assert state.hooks["hammer_storm_proc_ready"] is True
+
+    tariq_post_tick(state, "hammer_storm_proc")
+    state.hooks["_hammer_storm_proc_pending_since"] -= (HAMMER_STORM_PROC_CONFIRM_WINDOW_S + 0.1)
+    tariq_pre_tick(state)
+    assert state.hooks["hammer_storm_proc_ready"] is True
+    assert state.hooks["_hammer_storm_proc_pending"] is True
+
+    # La confirmation arrive ENFIN, bien après l'ancienne fenêtre de 0.5s.
+    state.detection["hammer_storm_casting"] = True
+    tariq_pre_tick(state)
+    assert state.hooks["hammer_storm_proc_ready"] is False, (
+        "une confirmation tardive doit quand même effacer ready -- "
+        "c'est exactement le bug rapporté par l'utilisateur"
+    )
+    assert state.hooks["_hammer_storm_proc_pending"] is False
+    print("Confirmation tardive (après l'ancienne fenêtre de 0.5s) efface bien ready -- bug corrigé.")
+
+
+def test_hammer_storm_proc_ready_still_expires_after_30s_if_never_confirmed():
+    """Le filet de sécurité (TARIQ_PROC_EXPIRE_S) reste actif même si _pending
+    ne s'efface plus sur timeout -- un press JAMAIS confirmé (vraiment rejeté
+    par le jeu) ne doit pas laisser ready consommable pour l'éternité, et
+    _pending doit être nettoyé en même temps (hygiène, cf. hooks.py)."""
+    from wardenbot.hooks import TARIQ_PROC_EXPIRE_S
+
+    state = CombatState()
+    state.buffs["hammer_storm_empowered"] = True
+    tariq_pre_tick(state)
+    tariq_post_tick(state, "hammer_storm_proc")
+    assert state.hooks["hammer_storm_proc_ready"] is True
+    assert state.hooks["_hammer_storm_proc_pending"] is True
+
+    # Jamais de canalisation, jamais de nouvelle presse -- juste le temps qui
+    # passe bien au-delà de TARIQ_PROC_EXPIRE_S.
+    state.hooks["_hammer_storm_proc_ready_armed_at"] = time.monotonic() - (TARIQ_PROC_EXPIRE_S + 1.0)
+    tariq_pre_tick(state)
+
+    assert state.hooks["hammer_storm_proc_ready"] is False
+    assert state.hooks["_hammer_storm_proc_pending"] is False, "_pending doit aussi être nettoyé quand ready expire"
+    print("Jamais confirmé -> ready expire bien après 30s, _pending nettoyé en même temps.")
 
 
 def test_hammer_storm_proc_press_with_real_cast_confirms_consumption():
@@ -783,10 +1056,20 @@ def test_debug_choice_reason_explains_why_the_winner_beat_the_runner_up():
 
 
 if __name__ == "__main__":
+    test_hysteresis_high_confidence_activates_from_inactive()
+    test_hysteresis_mid_confidence_does_not_activate_from_inactive()
+    test_hysteresis_mid_confidence_keeps_active_state()
+    test_hysteresis_below_low_threshold_deactivates()
+    test_hysteresis_missing_class_treated_as_zero_confidence()
+    test_hysteresis_tracks_the_three_buffs_independently()
     test_ready_flag_arms_only_on_rising_edge()
     test_stuck_active_reading_does_not_rearm_after_consumption()
     test_legitimate_rapid_reproc_still_fires()
     test_single_frame_noise_does_not_rearm_ready_flag()
+    test_ready_expires_after_the_real_proc_duration()
+    test_ready_does_not_expire_before_the_real_proc_duration()
+    test_skull_crusher_proc_ready_also_expires()
+    test_consuming_the_proc_well_before_expiration_still_works_normally()
     test_skull_crusher_proc_mirrors_hammer_storm_pattern()
     test_the_two_proc_flags_are_tracked_independently()
     test_priority_cleave_is_a_distinct_mode_from_st_and_aoe()
@@ -797,12 +1080,15 @@ if __name__ == "__main__":
     test_bar_reader_tolerates_single_pixel_border_artifact()
     test_hard_lock_blocks_even_off_gcd_abilities()
     test_hammer_storm_proc_fires_on_any_single_proc()
+    test_expired_tariq_detection_blocks_focused_wrath_discount()
     test_focused_wrath_discount_fires_hammer_storm_below_normal_threshold()
     test_focused_wrath_discount_does_not_fire_below_discounted_threshold()
     test_focused_wrath_discount_fires_skull_crusher_below_normal_threshold()
     test_no_discount_without_focused_wrath_active()
     test_hammer_storm_casting_flag_refreshes_hard_lock()
     test_hammer_storm_proc_press_without_real_cast_stays_ready_for_retry()
+    test_hammer_storm_proc_late_confirmation_still_clears_ready()
+    test_hammer_storm_proc_ready_still_expires_after_30s_if_never_confirmed()
     test_hammer_storm_proc_press_with_real_cast_confirms_consumption()
     test_heavy_strike_outranks_skull_crusher_proc_in_priority()
     test_planner_stays_normal_when_no_burst_window_imminent()

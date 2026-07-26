@@ -1,11 +1,22 @@
-pyyaml
-mss
-opencv-python-headless
-pydirectinput
-numpy
-pywebview
+# Épinglé sur les versions réellement installées/vérifiées fonctionnelles
+# sur cette machine (via `pip freeze`, pas des suppositions) -- reproduction
+# exacte de l'environnement de dev actuel, pas des bornes souples pour un
+# tiers qui installerait ailleurs. À revoir si ce fichier sert un jour à
+# autre chose (ex. installeur grand public visant des configs inconnues).
+pyyaml==6.0.3
+mss==10.2.0
+opencv-python-headless==5.0.0.93
+pydirectinput==1.0.4
+numpy==2.5.1
+pywebview==6.2.1
 --extra-index-url https://download.pytorch.org/whl/cu126
-torch
-torchvision
-easyocr
-ultralytics
+torch==2.13.0+cu126
+torchvision==0.28.0+cu126
+easyocr==1.7.2
+ultralytics==8.4.92
+# lap : dépendance transitive d'ultralytics, absente de cette machine avant
+# la 1re tentative de build PyInstaller (2026-07-26) -- ultralytics l'a
+# auto-installée à la volée pendant l'analyse ("AutoUpdate"), révélant
+# qu'elle manquait de requirements.txt. Épinglée explicitement pour ne pas
+# dépendre de ce comportement d'auto-installation silencieux à l'avenir.
+lap==0.5.13

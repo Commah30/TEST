@@ -85,6 +85,50 @@
         "mana_bar": {"left": 1210, "top": 864, "width": 95, "height": 10}
       },
       "_comment": "Régions party_*_hp/orb_bar mesurées le 2026-07-15 sur fellowship 2026-07-15 19-23-21.mp4 (2560x1440). mana_bar trouvée le 2026-07-15 sur la 2e vidéo (fellowship 2026-07-15 22-45-35.mp4, même résolution) : bord GAUCHE et hauteur confirmés (couleur cyan mesurée en pixels réels à x=1210-1303, y=864-874), mais la barre était proche du plein dans tous les instants examinés -- bord DROIT (0% réel) et largeur totale du conteneur PAS confirmés, width=95 est une estimation prudente à revalider dès qu'un moment de mana visiblement partiel est capturé. party_*_debuff RECALIBRÉES le 2026-07-16 : la 1re calibration (offset 91px depuis le bord gauche du cadre, mesurée une seule fois sur party_1 dans la 1re vidéo) était imprécise -- 2 mesures indépendantes sur la 2e vidéo (Elayra/party_1 ET Kaschy/party_2, icône différente mais même emplacement d'icône) donnent un offset cohérent de 109-110px, largeur ~34-43px -- valeurs ci-dessus recalées sur cette moyenne (offset 109px, largeur 44px, top remonté à 1013 pour inclure le haut de l'icône). RESTE NON RÉSOLU (cf. state_update.py) : aucune confirmation que l'icône observée soit spécifiquement LE debuff dispellable (vs un buff/proc/cooldown personnel) -- plusieurs icônes différentes vues à cet emplacement selon les instants, sans moyen de les distinguer depuis les pixels seuls."
+    },
+    "helena": {
+      "keybinds": {
+        "measured_strike": "1",
+        "power_strike": "2",
+        "shield_slam": "3",
+        "shield_throw": "4",
+        "shield_throw_proc": "4",
+        "shockwave": "5",
+        "hold_the_line": "6",
+        "shields_up": "q",
+        "sweeping_strike": "shift+5",
+        "iron_wall": "9"
+      },
+      "regions": {
+        "measured_strike": {"left": 1024, "top": 1239, "width": 52, "height": 52},
+        "power_strike": {"left": 1088, "top": 1239, "width": 52, "height": 51},
+        "shield_slam": {"left": 1152, "top": 1239, "width": 50, "height": 52},
+        "shield_throw": {"left": 1216, "top": 1239, "width": 52, "height": 50},
+        "shockwave": {"left": 1280, "top": 1239, "width": 51, "height": 51},
+        "hold_the_line": {"left": 1344, "top": 1239, "width": 52, "height": 51},
+        "shields_up": {"left": 1215, "top": 1175, "width": 52, "height": 50},
+        "sweeping_strike": {"left": 1280, "top": 1175, "width": 52, "height": 51},
+        "iron_wall": {"left": 1344, "top": 1175, "width": 52, "height": 50},
+        "toughness_bar": {"left": 361, "top": 904, "width": 228, "height": 11},
+        "helena_buff_bar": {"left": 970, "top": 1280, "width": 350, "height": 150},
+        "hold_the_line_buff": {"left": 1043, "top": 1310, "width": 75, "height": 75},
+        "shield_throw_proc": {"left": 1043, "top": 1310, "width": 75, "height": 75}
+      },
+      "_regions_comment": "Mesurees par l'utilisateur le 2026-07-19 via capture_helper.py mark, sur le profil Default (2560x1440). Coherentes avec les regions Tariq deja calibrees sur ce meme profil (meme rangee d'abilities, top 1239-1241 ; meme rangee d'utilitaires off-GCD, top 1175-1176) -- bon signe de coherence inter-personnages sur la meme UI de jeu. toughness_bar : donnee par l'utilisateur (361,904,228,11), PAS encore lue par le moteur (aucune make_helena_state_update_fn n'existe -- cf. game_config.py::CHARACTERS['helena'], make_state_update_fn=None). helena_buff_bar : confirmee par l'utilisateur comme IDENTIQUE a Meiko/buff_bar et Tariq/tariq_buff_bar (970,1280,350,150) -- meme element d'UI, position independante du personnage. hold_the_line_buff/shield_throw_proc (2026-07-19) : localisees par diff de frames contre une frame de reference vide, sur 2 videos fournies par l'utilisateur (Videos/Captures/'Buff hold the line 0.41s.mp4' t=41-43s, 'Shield throw proc 0.02 sec.mp4' t=2s -- les durees dans les noms de fichiers decrivent le decompte AFFICHE SUR L'ICONE au moment de la capture, pas un instant de lecture video, cf. discussion 2026-07-19). Les DEUX icones occupent EXACTEMENT le meme slot (1043,1310,75,75) dans helena_buff_bar -- mutuellement exclusives a l'ecran (jamais vues simultanement dans les videos), meme registre visuel que hammer_storm_empowered/skull_crusher_empowered cote Tariq. Templates correspondants dans templates/helena/hold_the_line_buff.png et shield_throw_proc.png -- AUCUN des deux n'est encore cable dans config/helena.yaml ni un state_update_fn (gap identique a toughness_bar).",
+      "_keybinds_comment": "Touches fournies par l'utilisateur le 2026-07-19. shield_throw et iron_wall sont mappees pour permettre la capture de template/un press manuel, mais restent HORS auto-rotation (config/helena.yaml) -- shield_throw et charge sont volontairement manuels (cf. commentaire de tete du YAML), iron_wall n'a jamais ete ajoutee a aucun build (ability d'urgence, cf. helena.yaml original fourni par l'utilisateur).",
+      "_comment": "2026-07-18/19, premier portage (cf. config/helena.yaml + game_config.py::CHARACTERS['helena']) -- keybinds ET regions desormais reels (cf. _keybinds_comment/_regions_comment), 9 templates captures dans templates/helena/. Restent a valider en jeu reel avec detect_check.py (jamais confirme en conditions reelles a ce stade) avant de faire confiance a 100% -- meme reserve que pour les autres personnages a leur premiere calibration."
+    },
+    "saryn": {
+      "keybinds": {
+        "toxic_lash": "3",
+        "nourish": "4"
+      },
+      "regions": {
+        "energy": {"left": 2356, "top": 1373, "width": 46, "height": 22},
+        "nourish": {"left": 2367, "top": 1312, "width": 32, "height": 32},
+        "toxic_lash": {"left": 2313, "top": 1307, "width": 24, "height": 36}
+      },
+      "_comment": "2026-07-21, regions mesurees par l'utilisateur via capture_helper.py mark/snap (templates dans templates/saryn/). energy CONFIRME fonctionnel : read_digits('energie.png') -> 103, lecture exacte. toxic_lash/nourish : read_countdown_seconds retourne None sur les templates captures -- PAS forcement une region incorrecte, plus probablement captures pendant que les buffs n'etaient PAS actifs (rien a lire a cet instant). A reverifier avec une capture PENDANT que le buff tourne (decompte visible a l'ecran) avant de faire confiance a la region."
     }
   }
 }

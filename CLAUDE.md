@@ -79,7 +79,9 @@ du forçage **alterne** désormais entre Spirited Vortex et Spirited Strikes
 chaque combat.
 
 `gcd_ms = 1100` — mesuré empiriquement par l'utilisateur (capture 30fps de la
-barre d'abilities), ne pas changer sans nouvelle mesure.
+barre d'abilities), ne pas changer sans nouvelle mesure. (Note : brièvement
+abaissé à 900 le 2026-07-21, puis annulé le jour même sur demande explicite
+de l'utilisateur, cf. config/warden.yaml.)
 
 ### Architecture
 
@@ -269,7 +271,9 @@ activation on Vortex, the next on Strikes, and so on), tracked via
 beginning of each fight.
 
 `gcd_ms = 1100` — measured empirically by l'utilisateur (30fps capture of the ability
-bar), do not change without a new measurement.
+bar), do not change without a new measurement. (Note: briefly lowered to 900
+on 2026-07-21, reverted the same day at the user's explicit request, cf.
+config/warden.yaml.)
 
 ### Architecture
 

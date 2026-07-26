@@ -16,7 +16,17 @@ importance pour cette mesure, seul le COÛT de la capture/matching/YOLO/OCR
 compte.
 
 USAGE :
-    python tick_timing_test.py [n_ticks=200]
+    python tick_timing_test.py [character=tariq] [n_ticks=200]
+
+GÉNÉRALISÉ (2026-07-19, cf. discussion audit performance) -- codé en dur sur
+Tariq à l'origine (seul personnage avec un vrai souci de budget confirmé à
+l'époque). pre_tick_hook/post_tick_hook/off_gcd_hook_abilities sont
+maintenant lus directement depuis CHARACTERS[character] (déjà la source de
+vérité, cf. game_config.py) plutôt qu'importés par leur nom -- élimine le
+couplage dur à Tariq sans changer le comportement pour Tariq lui-même.
+off_gcd_hook_abilities utilise .get(...) avec un défaut (frozenset()) : seul
+Tariq renseigne cette clé dans CHARACTERS, les autres personnages n'en ont
+simplement pas besoin (cf. RotationEngine, défaut identique).
 
 Le throttle YOLO (YOLO_DETECT_INTERVAL_S) et OCR (STACK_OCR_INTERVAL_S) sont
 basés sur le temps réel écoulé (time.monotonic()) -- ce script tourne les
@@ -32,23 +42,24 @@ import time
 from wardenbot.capture import ScreenCapture
 from wardenbot.matcher import TemplateMatcher
 from wardenbot.engine import CombatState, RotationEngine, load_abilities
-from wardenbot.hooks import tariq_pre_tick, tariq_post_tick
 
 from main import CHARACTERS, REGIONS
 
 
 def main():
-    n_ticks = int(sys.argv[1]) if len(sys.argv) > 1 else 200
+    character = sys.argv[1] if len(sys.argv) > 1 else "tariq"
+    n_ticks = int(sys.argv[2]) if len(sys.argv) > 2 else 200
 
-    cfg = CHARACTERS["tariq"]
-    regions = REGIONS["tariq"]
+    cfg = CHARACTERS[character]
+    regions = REGIONS[character]
 
     abilities, meta = load_abilities(cfg["config"])
     state = CombatState(mode=cfg["default_mode"])
 
     matcher = TemplateMatcher(cfg["templates"])
     capturer = ScreenCapture()
-    state_update_fn = cfg["make_state_update_fn"](capturer, matcher, regions)
+    make_state_update_fn = cfg["make_state_update_fn"]
+    state_update_fn = make_state_update_fn(capturer, matcher, regions) if make_state_update_fn is not None else None
 
     pressed_log = []
 
@@ -69,11 +80,13 @@ def main():
         press_fn=press_fn,
         is_ready_fn=is_ready_fn,
         gcd_ms=meta.get("gcd_ms", 1100),
-        pre_tick_hook=tariq_pre_tick,
-        post_tick_hook=tariq_post_tick,
+        pre_tick_hook=cfg["pre_tick_hook"],
+        post_tick_hook=cfg["post_tick_hook"],
         state_update_fn=state_update_fn,
-        off_gcd_hook_abilities=cfg["off_gcd_hook_abilities"],
+        off_gcd_hook_abilities=cfg.get("off_gcd_hook_abilities", frozenset()),
     )
+
+    print(f"Personnage : {character}\n")
 
     print(f"Mesure de {n_ticks} ticks (capture réelle, YOLO+EasyOCR throttlés comme en prod, aucune touche pressée)...\n")
 

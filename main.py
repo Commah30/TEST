@@ -48,7 +48,7 @@ DPI_AWARENESS_LEVEL = enable_dpi_awareness()
 import ctypes
 import sys
 import time
-from pathlib import Path
+import winsound
 from typing import Callable, Optional
 
 # La console Windows par défaut est en cp1252 -- EasyOCR (utilisé par
@@ -61,16 +61,21 @@ if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stderr.reconfigure(encoding="utf-8")
 
 from wardenbot.capture import ScreenCapture
+from wardenbot.circuit import make_circuit_breaker
 from wardenbot.config_manager import ConfigManager, list_profiles, validate_profile
 from wardenbot.diagnostics import check_foreground_window, log_error
 from wardenbot.engine import CombatState, RotationEngine, load_abilities, load_weight_overrides, parse_sequences
 from wardenbot.game_config import CHARACTERS
 from wardenbot.input_sim import InputSimulator, InputWorker
 from wardenbot.matcher import TemplateMatcher
+from wardenbot.paths import data_path, resource_path
 from wardenbot.state_update import TARIQ_BUFF_BAR_THRESHOLDS  # noqa: F401 -- re-exporté, cf. build_yolo_dataset.py
 from wardenbot.telemetry import TelemetryWorker
+from wardenbot import __version__
 
-DEBUG_LOG_PATH = Path("debug.log")
+# data_path(), PAS Path(...) nu (2026-07-26, cf. wardenbot/diagnostics.py
+# pour la justification complète -- même raisonnement pour debug.log).
+DEBUG_LOG_PATH = data_path("debug.log")
 
 # PHASE 1 industrialisation (2026-07-14) : REGIONS/KEY_MAP ne sont plus des
 # dicts codés en dur dans wardenbot/game_config.py -- ils viennent maintenant
@@ -251,7 +256,7 @@ def build_engine(
     if not dry_run:
         validate_profile(config, required_regions=cfg.get("required_regions"))
 
-    abilities, meta = load_abilities(cfg["config"])
+    abilities, meta = load_abilities(resource_path(cfg["config"]))
     # Phase 3 (2026-07-14) : bloc `sequences:` optionnel, déjà exposé tel
     # quel dans `meta` par load_abilities (clé "sequences" du YAML, comme
     # n'importe quelle autre clé de haut niveau hors `abilities:`) -- absent
@@ -294,7 +299,7 @@ def build_engine(
         telemetry = TelemetryWorker()
         telemetry.start()
 
-    matcher = TemplateMatcher(cfg["templates"])
+    matcher = TemplateMatcher(resource_path(cfg["templates"]))
     capturer = ScreenCapture() if not dry_run else None
     input_sim = InputSimulator(dry_run=dry_run)
 
@@ -350,6 +355,51 @@ def build_engine(
         else None
     )
 
+    # FUITE CONFIRMÉE (audit architecture, 2026-07-18) : ni input_worker ni le
+    # thread de détection (Meiko/Tariq -- cf. state_update.py, stop_event
+    # maintenant exposé en attribut) n'avaient de handle exposé à l'appelant
+    # -- app.py::BotController.set_profile abandonnait donc l'ancien engine
+    # SANS jamais les arrêter (cf. son propre commentaire, "limitation
+    # connue"). shutdown_fn regroupe les deux ici, où build_engine sait
+    # exactement ce qu'il vient de créer -- RotationEngine, lui, reste
+    # opaque à leur sujet (cf. Intent/shutdown_fn, engine.py).
+    # EN: CONFIRMED LEAK (architecture audit, 2026-07-18): neither
+    # EN: input_worker nor the detection thread (Meiko/Tariq -- cf.
+    # EN: state_update.py, stop_event now exposed as an attribute) had a
+    # EN: handle exposed to the caller -- app.py::BotController.set_profile
+    # EN: therefore dropped the old engine WITHOUT ever stopping them (cf. its
+    # EN: own comment, "known limitation"). shutdown_fn bundles both here,
+    # EN: where build_engine knows exactly what it just created --
+    # EN: RotationEngine itself stays opaque to their details (cf.
+    # EN: Intent/shutdown_fn, engine.py).
+    def _shutdown() -> None:
+        input_worker.stop()
+        detection_stop_event = getattr(state_update_fn, "stop_event", None)
+        if detection_stop_event is not None:
+            detection_stop_event.set()
+        # AJOUTÉ (2026-07-26, app.py active désormais enable_telemetry=True) :
+        # avant ça, telemetry n'était jamais dans le champ de _shutdown() --
+        # inoffensif tant qu'app.py::BotController ne l'activait jamais (donc
+        # toujours None ici). Maintenant qu'il l'active, un changement de
+        # personnage (set_profile -> engine.shutdown()) sans ce stop()
+        # laisserait l'ANCIEN TelemetryWorker (thread daemon, fichier ouvert)
+        # tourner indéfiniment en arrière-plan -- exactement le même genre de
+        # fuite que celle déjà corrigée ci-dessus pour input_worker/thread de
+        # détection (audit architecture 2026-07-18), pas traitée à l'époque
+        # puisque telemetry était toujours None pour BotController.
+        # EN: ADDED (2026-07-26, app.py now enables enable_telemetry=True):
+        # EN: before this, telemetry was never in _shutdown()'s scope --
+        # EN: harmless as long as app.py::BotController never enabled it (so
+        # EN: always None here). Now that it does, a character switch
+        # EN: (set_profile -> engine.shutdown()) without this stop() would
+        # EN: leave the OLD TelemetryWorker (daemon thread, open file) running
+        # EN: indefinitely in the background -- the exact same kind of leak
+        # EN: already fixed above for input_worker/the detection thread
+        # EN: (architecture audit, 2026-07-18), not handled back then since
+        # EN: telemetry was always None for BotController.
+        if telemetry is not None:
+            telemetry.stop()
+
     engine_kwargs = dict(
         abilities=abilities,
         state=state,
@@ -362,11 +412,34 @@ def build_engine(
         sequences=sequences,
         telemetry=telemetry,
         weight_overrides=weight_overrides,
+        shutdown_fn=_shutdown,
     )
     if "off_gcd_hook_abilities" in cfg:
         engine_kwargs["off_gcd_hook_abilities"] = cfg["off_gcd_hook_abilities"]
 
-    return RotationEngine(**engine_kwargs)
+    engine = RotationEngine(**engine_kwargs)
+    # PROTOCOLE DE CONFIRMATION INPUT (audit architecture, 2026-07-18, cf.
+    # engine.py::RotationEngine.report_press_outcome / input_sim.py::
+    # InputWorker.on_press_result pour le détail des deux bouts). Branché
+    # APRÈS la construction de engine (pas via le constructeur d'InputWorker
+    # plus haut) : engine n'existe pas encore au moment où input_worker est
+    # créé -- input_worker.on_press_result reste un attribut public
+    # rebranchable après coup pour cette raison précise (cf. input_sim.py).
+    # En dry_run, input_worker existe quand même (cf. plus haut, presses
+    # simulées) : le brancher ne coûte rien, InputSimulator.press() en
+    # dry_run ne lève jamais, donc success=True systématiquement.
+    # EN: INPUT CONFIRMATION PROTOCOL (architecture audit, 2026-07-18, cf.
+    # EN: engine.py::RotationEngine.report_press_outcome / input_sim.py::
+    # EN: InputWorker.on_press_result for both ends' detail). Wired AFTER
+    # EN: engine is built (not through InputWorker's constructor above):
+    # EN: engine doesn't exist yet when input_worker is created --
+    # EN: input_worker.on_press_result stays a public, after-the-fact
+    # EN: rebindable attribute for exactly this reason (cf. input_sim.py). In
+    # EN: dry_run, input_worker still exists (cf. above, simulated presses):
+    # EN: wiring it costs nothing, InputSimulator.press() in dry_run never
+    # EN: raises, so success=True every time.
+    input_worker.on_press_result = engine.report_press_outcome
+    return engine
 
 
 def choose_character() -> str:
@@ -424,6 +497,85 @@ def make_error_handler() -> Callable[[BaseException], None]:
     return on_error
 
 
+# Seuils par défaut du coupe-circuit (cf. wardenbot/circuit.py) -- départ,
+# non mesurés sur un vrai incident, même honnêteté que gcd_ms avant
+# calibration : max_streak_s=10s (panne franche), flap_window_s=30s /
+# flap_error_ratio=90% / min_flap_samples=10 (flapping). À ajuster si un
+# vrai incident montre qu'ils sont trop stricts/permissifs.
+# EN: Default circuit-breaker thresholds (cf. wardenbot/circuit.py) --
+# EN: starting point, not measured on a real incident, same honesty as
+# EN: gcd_ms before calibration: max_streak_s=10s (hard failure),
+# EN: flap_window_s=30s / flap_error_ratio=90% / min_flap_samples=10
+# EN: (flapping). Adjust if a real incident shows they're too strict/loose.
+CIRCUIT_MAX_STREAK_S = 10.0
+CIRCUIT_FLAP_WINDOW_S = 30.0
+CIRCUIT_FLAP_ERROR_RATIO = 0.9
+CIRCUIT_MIN_FLAP_SAMPLES = 10
+
+
+def make_circuit_wiring(character: str, telemetry: Optional[TelemetryWorker]):
+    """
+    Wiring applicatif du coupe-circuit PUR (wardenbot/circuit.py) : instancie
+    make_circuit_breaker avec les seuils par défaut du projet ci-dessus, et
+    branche sur trip l'alerte (winsound.Beep, stdlib, Windows uniquement --
+    cohérent avec pydirectinput qui l'est déjà) + l'incident télémétrie
+    (wardenbot/telemetry.py::TelemetryWorker.log_incident, no-op si
+    telemetry est None). circuit.py lui-même reste pur -- ce module-ci fait
+    tout ce qui touche à l'I/O (son, disque), jamais circuit.py.
+
+    Retourne (record_error, record_success, is_tripped, reset) :
+    - record_error(now, exc) : PAS la même signature que
+      circuit.py::record_error(now) -- exc est nécessaire ICI pour la
+      "dernière exception" du log d'incident, mais n'a rien à faire dans le
+      mécanisme pur de circuit.py (qui ne connaît que des succès/échecs
+      booléens dans le temps).
+    - record_success(now), is_tripped(), reset() : passthrough direct sur
+      circuit.py.
+
+    EN: Application-level wiring for the PURE circuit breaker
+    EN: (wardenbot/circuit.py): instantiates make_circuit_breaker with the
+    EN: project's default thresholds above, and wires the trip alert
+    EN: (winsound.Beep, stdlib, Windows-only -- consistent with
+    EN: pydirectinput which already is) + the telemetry incident
+    EN: (wardenbot/telemetry.py::TelemetryWorker.log_incident, no-op if
+    EN: telemetry is None) onto it. circuit.py itself stays pure -- this
+    EN: module does everything I/O-related (sound, disk), never circuit.py.
+
+    EN: Returns (record_error, record_success, is_tripped, reset):
+    EN: - record_error(now, exc): NOT the same signature as
+    EN:   circuit.py::record_error(now) -- exc is needed HERE for the
+    EN:   incident log's "last exception", but has no business in
+    EN:   circuit.py's pure mechanism (which only knows booleans
+    EN:   success/failure over time).
+    EN: - record_success(now), is_tripped(), reset(): direct passthrough to
+    EN:   circuit.py.
+    """
+    last_exception: list = [None]
+
+    def on_trip(reason: str) -> None:
+        print(f"[main] COUPE-CIRCUIT DÉCLENCHÉ ({character}) : {reason}")
+        try:
+            winsound.Beep(1000, 700)
+        except Exception:
+            pass  # pas de périphérique son dispo -- ne doit jamais empêcher la pause
+        if telemetry is not None:
+            telemetry.log_incident(reason, character, last_exception=last_exception[0])
+
+    _record_error, record_success, is_tripped, reset = make_circuit_breaker(
+        max_streak_s=CIRCUIT_MAX_STREAK_S,
+        flap_window_s=CIRCUIT_FLAP_WINDOW_S,
+        flap_error_ratio=CIRCUIT_FLAP_ERROR_RATIO,
+        min_flap_samples=CIRCUIT_MIN_FLAP_SAMPLES,
+        on_trip=on_trip,
+    )
+
+    def record_error(now: float, exc: BaseException) -> None:
+        last_exception[0] = exc
+        _record_error(now)
+
+    return record_error, record_success, is_tripped, reset
+
+
 def _log_pause_event(paused: bool) -> None:
     """Écrit un marqueur bien visible DANS debug.log au moment exact d'un
     toggle pause/reprise (cf. make_pause_toggle::on_toggle) -- pas dedup,
@@ -436,6 +588,7 @@ def _log_pause_event(paused: bool) -> None:
 
 
 if __name__ == "__main__":
+    print(f"[main] wardenbot v{__version__}")
     print(f"[main] DPI awareness : {DPI_AWARENESS_LEVEL}")
     character = choose_character()
     profile = choose_profile()
@@ -461,10 +614,59 @@ if __name__ == "__main__":
 
     log_tick = make_debug_logger(engine.state)
     check_reset_hotkey = make_debug_reset_hotkey(engine.state)
-    is_paused, check_pause_hotkey = make_pause_toggle(on_toggle=_log_pause_event)
-    on_error = make_error_handler()
+    base_on_error = make_error_handler()
+    circuit_record_error, circuit_record_success, circuit_is_tripped, circuit_reset = (
+        make_circuit_wiring(character, engine.telemetry)
+    )
+
+    # Reprise manuelle (touche C) -> reset() du coupe-circuit (cf.
+    # wardenbot/circuit.py docstring) : si la panne sous-jacente persiste, un
+    # nouveau streak/ratio re-déclenchera naturellement quelques secondes
+    # plus tard (re-bip, re-pause) -- COMPORTEMENT ATTENDU, pas un bug : une
+    # reprise manuelle est un acte informé, re-tripper confirme juste que le
+    # problème n'est pas résolu.
+    # EN: Manual resume (C key) -> reset() the circuit breaker (cf.
+    # EN: wardenbot/circuit.py docstring): if the underlying fault persists,
+    # EN: a new streak/ratio will naturally re-trip a few seconds later
+    # EN: (re-beep, re-pause) -- INTENDED behavior, not a bug: a manual
+    # EN: resume is an informed act, re-tripping just confirms the problem
+    # EN: isn't resolved.
+    def on_pause_toggle(is_now_paused: bool) -> None:
+        _log_pause_event(is_now_paused)
+        if not is_now_paused:
+            circuit_reset()
+
+    manual_is_paused, check_pause_hotkey = make_pause_toggle(on_toggle=on_pause_toggle)
+
+    def is_paused() -> bool:
+        # OR logique (pas une 2e boucle parallèle) : le coupe-circuit force
+        # la pause exactement comme le ferait l'utilisateur via C.
+        # EN: Logical OR (not a 2nd parallel loop): the circuit breaker
+        # EN: forces the pause exactly like the user would via C.
+        return manual_is_paused() or circuit_is_tripped()
+
+    _tick_had_error = {"v": False}
+
+    def on_error(exc: BaseException) -> None:
+        _tick_had_error["v"] = True
+        base_on_error(exc)
+        circuit_record_error(time.monotonic(), exc)
 
     def on_tick(pressed: Optional[str]) -> None:
+        # Consommé À CHAQUE itération (pause ou non) pour ne jamais laisser
+        # une valeur périmée traîner jusqu'à la reprise -- cf.
+        # make_circuit_wiring docstring : seul l'ENREGISTREMENT (succès/échec
+        # côté coupe-circuit) est sauté pendant une pause, jamais la
+        # consommation du flag lui-même.
+        # EN: Consumed on EVERY iteration (paused or not) so a stale value
+        # EN: never lingers until resume -- cf. make_circuit_wiring
+        # EN: docstring: only the RECORDING (success/failure on the circuit
+        # EN: breaker side) is skipped during a pause, never the flag's
+        # EN: consumption itself.
+        had_error = _tick_had_error["v"]
+        _tick_had_error["v"] = False
+        if not manual_is_paused() and not circuit_is_tripped() and not had_error:
+            circuit_record_success(time.monotonic())
         log_tick(pressed)
         check_reset_hotkey()
         check_pause_hotkey()
@@ -483,4 +685,3 @@ if __name__ == "__main__":
         # EN: thread killed at process exit).
         if engine.telemetry is not None:
             engine.telemetry.stop()
-2

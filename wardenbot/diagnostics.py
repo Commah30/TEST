@@ -17,16 +17,47 @@ import ctypes
 import subprocess
 import time
 import traceback
-from pathlib import Path
 from typing import Optional
+
+from wardenbot.paths import data_path
+
+# data_path(), PAS Path(...) nu (correction 2026-07-26, retour reçu après
+# l'audit resource_path()/data_path()) : ces logs de SESSION sont écrits en
+# continu pendant que app.py/main.py tournent -- le même raisonnement que
+# profiles/ s'applique. Un lancement depuis un CWD qui n'est PAS le dossier
+# de l'exe (raccourci avec "Démarrer dans" vide/différent, ou le test de
+# packaging lancé depuis C:\Windows\System32 qui a servi à vérifier
+# resource_path()) ferait échouer l'écriture ou, pire, la ferait réussir
+# silencieusement ailleurs via la virtualisation UAC (VirtualStore) -- des
+# logs write qui existent mais que personne ne retrouve. Particulièrement
+# critique pour ERROR_LOG_PATH et telemetry.jsonl (cf. wardenbot/telemetry.py) :
+# c'est exactement le canal du coupe-circuit (wardenbot/circuit.py::
+# log_incident), construit précisément pour qu'un incident laisse une
+# trace -- un incident qui échoue à s'écrire silencieusement serait
+# l'inverse du contrat de ce mécanisme. En dev (pas de sys.frozen),
+# data_path() est un no-op, comportement inchangé.
+# EN: data_path(), NOT a bare Path(...) (correction 2026-07-26, feedback
+# EN: received after the resource_path()/data_path() audit): these SESSION
+# EN: logs are written continuously while app.py/main.py run -- same
+# EN: reasoning as profiles/. A launch from a CWD that ISN'T the exe's
+# EN: folder (a shortcut with an empty/different "Start in", or the
+# EN: packaging test launched from C:\Windows\System32 that was used to
+# EN: verify resource_path()) would make the write fail, or worse, silently
+# EN: succeed elsewhere via UAC virtualization (VirtualStore) -- logs that
+# EN: exist but nobody finds. Especially critical for ERROR_LOG_PATH and
+# EN: telemetry.jsonl (cf. wardenbot/telemetry.py): that's exactly the
+# EN: circuit breaker's channel (wardenbot/circuit.py::log_incident), built
+# EN: precisely so an incident leaves a trace -- an incident that silently
+# EN: fails to write would be the opposite of that mechanism's contract. In
+# EN: dev (no sys.frozen), data_path() is a no-op, unchanged behavior.
 
 # Cf. CLAUDE.md / commentaires historiques (main.py, 2026-07-12) : au moins un
 # blocage total de ~45s observé une fois, jamais reproduit depuis -- ce seuil
 # détecte tout appel (capture, matching, YOLO, OCR) largement au-dessus du
 # ~15-30ms mesuré en conditions normales.
 CAPTURE_WATCHDOG_THRESHOLD_S = 0.2
-CAPTURE_WATCHDOG_LOG_PATH = Path("capture_watchdog.log")
-ERROR_LOG_PATH = Path("error.log")
+CAPTURE_WATCHDOG_LOG_PATH = data_path("capture_watchdog.log")
+ERROR_LOG_PATH = data_path("error.log")
 
 # Snapshot GPU au moment du pic (2026-07-12, suite à la question "OCR/YOLO
 # peut-il faire chuter le FPS ?") : les pics ponctuels de plusieurs secondes
@@ -149,7 +180,7 @@ def log_pipeline_diagnostic(
 # le titre réel diffère, à corriger avant de tirer des conclusions de ce
 # log.
 GAME_WINDOW_TITLE_HINT = "fellowship"
-FOCUS_LOG_PATH = Path("focus_check.log")
+FOCUS_LOG_PATH = data_path("focus_check.log")
 
 
 def check_foreground_window(label: str) -> None:
@@ -187,7 +218,7 @@ def check_foreground_window(label: str) -> None:
 # même famille que le bug Shift+3 déjà rencontré -- (hold_ms anormalement
 # court) ; (C) InputWorker est innocent (tout est quasi instantané), auquel
 # cas le problème est ailleurs (jeu/serveur), pas dans ce projet.
-INPUT_TIMING_LOG_PATH = Path("input_timing.log")
+INPUT_TIMING_LOG_PATH = data_path("input_timing.log")
 
 
 def log_input_timing(
@@ -231,7 +262,7 @@ def log_input_timing(
 # avec time.monotonic() pour la fenêtre de confirmation (cf.
 # PRESS_CONFIRM_WINDOW_S, hooks.py) -- uniquement pour que ce log reste
 # lisible et recoupable avec les autres fichiers.
-PRESS_CONFIRM_LOG_PATH = Path("press_confirm.log")
+PRESS_CONFIRM_LOG_PATH = data_path("press_confirm.log")
 
 
 def log_press_confirmation(

@@ -20,7 +20,7 @@ USAGE :
 
   python capture_helper.py snap <perso> <nom> <left> <top> <width> <height>
       Capture CETTE région précise à l'instant T et la sauvegarde dans
-      templates/<perso>/<nom>.png ("meiko", "tariq" ou "vigour"). Lance ça pendant que
+      templates/<perso>/<nom>.png ("meiko", "tariq", "vigour", "helena" ou "saryn"). Lance ça pendant que
       l'état voulu est affiché en jeu (icône "ready", debuff à 3 stacks
       visible, etc.) -- le "mark" ci-dessus te donne juste la position,
       "snap" fait la vraie capture.
@@ -121,8 +121,8 @@ def cmd_snap(character: str, name: str, left: int, top: int, width: int, height:
     if cv2 is None:
         print("opencv-python n'est pas installé -- pip install -r requirements.txt")
         return
-    if character not in ("meiko", "tariq", "vigour"):
-        print(f"Personnage inconnu : {character!r} -- attendu 'meiko', 'tariq' ou 'vigour'")
+    if character not in ("meiko", "tariq", "vigour", "helena", "saryn"):
+        print(f"Personnage inconnu : {character!r} -- attendu 'meiko', 'tariq', 'vigour', 'helena' ou 'saryn'")
         return
 
     out_dir = Path("templates") / character

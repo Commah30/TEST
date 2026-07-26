@@ -6,6 +6,7 @@ error.log
 focus_check.log
 input_timing.log
 press_confirm.log
+pyinstaller_build*.log
 
 # Phase 4 (2026-07-14, télémétrie + tuning appris) : telemetry.jsonl
 # s'accumule à travers PLUSIEURS sessions (contrairement aux logs ci-dessus,
@@ -37,11 +38,23 @@ burst/
 /wardenbot.exe
 
 # Poids YOLO pré-entraînés de base (téléchargés automatiquement par
-# ultralytics au premier entraînement, pas spécifiques au projet -- NE PAS
-# confondre avec runs/detect/*/weights/best.pt, notre modèle entraîné, qui
-# reste versionné)
+# ultralytics au premier entraînement, pas spécifiques au projet)
 /yolo26n.pt
 /yolov8n.pt
+
+# Poids YOLO ENTRAÎNÉS du projet (audit "RPA professionnel", 2026-07-26) :
+# NE PLUS versionner runs/detect/*/weights/*.pt dans git ordinaire à partir
+# de maintenant -- gonflement irréversible du clone (plusieurs dizaines de
+# Mo par run d'entraînement), sans plus-value en historique diff. Décision :
+# distribués en asset de release séparé (GitHub Release) au moment de
+# chaque packaging, plutôt qu'adopter Git LFS (pas de nouvel outil/quota
+# externe). ATTENTION : ceci arrête seulement le versionnement FUTUR -- les
+# 12 fichiers déjà commités (train/, train-2/ à train-6/) restent dans
+# l'historique git pour toujours chez tous les clones existants ; les
+# retirer réellement de l'historique exigerait une réécriture séparée et
+# destructive (`git filter-repo` ou équivalent, force-push, recloner partout)
+# -- décision distincte, optionnelle, à prendre plus tard, PAS incluse ici.
+runs/detect/*/weights/*.pt
 
 # Captures de calibration ponctuelles/debug, écrasées à chaque usage
 scratch_ragebar_001.png

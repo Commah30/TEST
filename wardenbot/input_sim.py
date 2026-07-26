@@ -165,10 +165,68 @@ class InputWorker:
     # ability, un chantier plus lourd, pas encore fait.
     TRACKED_LABELS: Optional[frozenset] = None  # None = toutes les abilities
 
-    def __init__(self, input_sim: InputSimulator, on_before_press: Optional[Callable[[str], None]] = None):
+    # QUEUE NON BORNÉE (audit architecture, 2026-07-18) : queue.Queue() sans
+    # maxsize -- si le worker se bloquait durablement (deadlock, exception en
+    # boucle malgré le try/except plus bas...), rien n'empêchait
+    # request_press() d'empiler indéfiniment des presses de plus en plus
+    # périmées, chacune exécutée bien après que la décision qui l'a produite
+    # ait cessé d'être pertinente. MAX_QUEUE_SIZE=32 fixé à partir de données
+    # RÉELLES (input_timing.log, une vraie session Tariq) plutôt qu'inventé :
+    # sur 34546 presses journalisées, queue_depth_enqueue vaut 0 dans 99.3%
+    # des cas, 1 dans 0.7%, 2 dans 0.03%, JAMAIS plus -- 32 reste donc à des
+    # années-lumière de tout fonctionnement normal observé, tout en bornant
+    # le cas pathologique. cf. request_press() pour le comportement à queue
+    # pleine (drop + log, jamais de blocage).
+    # EN: UNBOUNDED QUEUE (architecture audit, 2026-07-18): queue.Queue() with
+    # EN: no maxsize -- if the worker got durably stuck (deadlock, an
+    # EN: exception looping despite the try/except below...), nothing stopped
+    # EN: request_press() from stacking presses indefinitely, each growing
+    # EN: more stale, executed long after the decision that produced it
+    # EN: stopped being relevant. MAX_QUEUE_SIZE=32 set from REAL data
+    # EN: (input_timing.log, an actual Tariq session) rather than invented: out
+    # EN: of 34546 logged presses, queue_depth_enqueue is 0 in 99.3% of cases,
+    # EN: 1 in 0.7%, 2 in 0.03%, NEVER more -- 32 is therefore light-years away
+    # EN: from any normal operation observed, while still bounding the
+    # EN: pathological case. cf. request_press() for full-queue behavior (drop
+    # EN: + log, never blocking).
+    MAX_QUEUE_SIZE = 32
+
+    def __init__(
+        self,
+        input_sim: InputSimulator,
+        on_before_press: Optional[Callable[[str], None]] = None,
+        on_press_result: Optional[Callable[[str, bool, float], None]] = None,
+    ):
+        """on_press_result(label, success, executed_at) -- PROTOCOLE DE
+        CONFIRMATION (audit architecture, 2026-07-18, cf. engine.py::
+        RotationEngine.report_press_outcome pour le consommateur). Appelé
+        DEPUIS ce thread d'input (jamais celui de la décision) juste après
+        chaque tentative de presse RÉELLE (succès ou échec, cf. _run) ET
+        depuis request_press() elle-même quand une demande est abandonnée
+        faute de place (cf. MAX_QUEUE_SIZE). executed_at : time.monotonic(),
+        PAS time.time() -- comparable directement à state.cooldown_until/
+        gcd_until côté RotationEngine (cf. principe du projet : jamais
+        time.time() pour un calcul de durée). None (défaut) = aucun
+        changement de comportement pour un appelant qui ne le branche pas
+        (ex. tous les tests de ce fichier).
+
+        EN: on_press_result(label, success, executed_at) -- CONFIRMATION
+        EN: PROTOCOL (architecture audit, 2026-07-18, cf. engine.py::
+        EN: RotationEngine.report_press_outcome for the consumer). Called
+        EN: FROM this input thread (never the decision one) right after every
+        EN: REAL press attempt (success or failure, cf. _run) AND from
+        EN: request_press() itself when a request gets dropped for lack of
+        EN: room (cf. MAX_QUEUE_SIZE). executed_at: time.monotonic(), NOT
+        EN: time.time() -- directly comparable to state.cooldown_until/
+        EN: gcd_until on RotationEngine's side (cf. the project's principle:
+        EN: never time.time() for a duration computation). None (default) =
+        EN: no behavior change for a caller that doesn't wire it (e.g. every
+        EN: test in this file).
+        """
         self._input_sim = input_sim
         self._on_before_press = on_before_press
-        self._queue: "queue.Queue[tuple[str, str, bool, float, int]]" = queue.Queue()
+        self.on_press_result = on_press_result
+        self._queue: "queue.Queue[tuple[str, str, bool, float, int]]" = queue.Queue(maxsize=self.MAX_QUEUE_SIZE)
         self._stop_event = threading.Event()
         self._last_press_end_ts: Optional[float] = None
         self._thread = threading.Thread(target=self._run, daemon=True, name="input-worker")
@@ -193,10 +251,12 @@ class InputWorker:
             )
             track = self.TRACKED_LABELS is None or label in self.TRACKED_LABELS
             keydown_ts = keyup_ts = None
+            success = False
             try:
                 if self._on_before_press is not None:
                     self._on_before_press(label)
                 keydown_ts, keyup_ts = self._input_sim.press(key, label=label, light=light)
+                success = True
             except Exception as exc:
                 # ROBUSTESSE (même principe que le thread de détection et
                 # RotationEngine.run_forever) : une exception ici ne doit
@@ -206,6 +266,16 @@ class InputWorker:
                 log_error(f"input_worker.press({label!r})", exc)
             finally:
                 self._last_press_end_ts = time.time()
+            if self.on_press_result is not None:
+                # Protocole de confirmation (cf. __init__) -- success=False
+                # ici couvre l'exception ci-dessus (rien n'a réellement été
+                # pressé, malgré on_before_press/le dequeue qui, eux, ont bien
+                # eu lieu).
+                # EN: Confirmation protocol (cf. __init__) -- success=False
+                # EN: here covers the exception above (nothing was actually
+                # EN: pressed, despite on_before_press/the dequeue, which DID
+                # EN: happen).
+                self.on_press_result(label, success, time.monotonic())
             if track:
                 log_input_timing(
                     label=label,
@@ -221,10 +291,34 @@ class InputWorker:
     def request_press(self, key: str, label: str, light: bool = False) -> None:
         """Non-bloquant -- empile la demande, le thread d'input l'exécute
         dès qu'il est libre (généralement en quelques ms, jamais plus que la
-        durée de la presse précédente)."""
+        durée de la presse précédente).
+
+        Queue PLEINE (cf. MAX_QUEUE_SIZE) : DROP la nouvelle demande plutôt
+        que de bloquer ce thread (celui de la décision, RotationEngine.tick())
+        ou d'évincer une entrée déjà en attente -- put_nowait() lève
+        queue.Full immédiatement, jamais d'attente. Journalisé via log_error
+        (jamais silencieux) : à ce niveau de profondeur (32, cf. commentaire
+        de classe -- jamais observé au-delà de 2 en jeu réel), la queue pleine
+        signale déjà quelque chose de cassé (worker mort/bloqué) -- perdre
+        UNE presse de plus n'aggrave pas la situation, la faire disparaître
+        du log la cacherait. on_press_result(label, False, ...) est APPELÉ
+        ICI MÊME, SUR CE thread (celui de la décision, pas celui d'input --
+        seul cas où le protocole de confirmation ne vient pas du thread
+        d'input) : la demande n'a même pas atteint la queue, il n'y a pas de
+        thread d'input à attendre pour le savoir.
+        """
         enqueue_ts = time.time()
         queue_depth_at_enqueue = self._queue.qsize()
-        self._queue.put((key, label, light, enqueue_ts, queue_depth_at_enqueue))
+        try:
+            self._queue.put_nowait((key, label, light, enqueue_ts, queue_depth_at_enqueue))
+        except queue.Full:
+            from wardenbot.diagnostics import log_error  # import tardif -- même raison que _run()
+            log_error(
+                f"input_worker.request_press({label!r})",
+                queue.Full(f"queue pleine (maxsize={self.MAX_QUEUE_SIZE}) -- presse abandonnée, worker probablement bloqué"),
+            )
+            if self.on_press_result is not None:
+                self.on_press_result(label, False, time.monotonic())
 
     def stop(self) -> None:
         self._stop_event.set()

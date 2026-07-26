@@ -64,7 +64,21 @@ build_name: Spam
 display_name: "Spam V2"
 post_tick_hook: tariq_post_tick
 
-gcd_ms: 1000
+# gcd_ms: 1000 -> 700 (2026-07-19, donné par l'utilisateur -- Haste a changé
+# depuis la dernière mesure). Suite à l'analyse de debug.log (session
+# 17:44-18:17) montrant un rythme de presse réel de ~0.98/s, collant presque
+# exactement à l'ancien 1000ms -- le rythme mesuré suivait donc fidèlement
+# CE réglage, pas un vrai plafond de jeu : la config était simplement
+# devenue périmée. À revalider avec une nouvelle mesure (debug.log,
+# rythme de presse réel) si le ressenti "trop lent" persiste.
+# EN: gcd_ms: 1000 -> 700 (2026-07-19, given by the user -- Haste changed
+# EN: since the last measurement). Following the debug.log analysis (session
+# EN: 17:44-18:17) showing a real press rate of ~0.98/s, almost exactly
+# EN: matching the old 1000ms -- the measured cadence was faithfully
+# EN: following THIS setting, not a real in-game ceiling: the config had
+# EN: simply gone stale. Revalidate with a fresh measurement (debug.log,
+# EN: real press rate) if the "too slow" feeling persists.
+gcd_ms: 700
 
 abilities:
   # BUG TROUVÉ EN JEU (2026-07-12), corrigé : cooldown_ms:500 était inventé.

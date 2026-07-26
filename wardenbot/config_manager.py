@@ -29,12 +29,58 @@ connaît toujours que .regions/.keybinds, exactement comme en Phase 1.
 from __future__ import annotations
 
 import json
+import shutil
+import sys
 from pathlib import Path
 from typing import Optional
 
+from wardenbot.paths import data_path, resource_path
+
 SUPPORTED_CONFIG_VERSION = 1
-PROFILES_DIR = Path("profiles")
+# data_path(), PAS resource_path() (correction 2026-07-26, retour reçu) :
+# profiles/ est ÉCRIT par wardenbot/calibration_wizard.py (nouveau profil
+# sauvegardé après calibration) -- ce n'est PAS une ressource en lecture
+# seule. resource_path() (ancré sur sys._MEIPASS, donc _internal/ en
+# onedir) serait écrasé au prochain redéploiement du bundle et
+# potentiellement non-inscriptible (Program Files). data_path() ancre sur
+# le dossier de l'exécutable -- réflexe "app portable", cohérent avec le
+# public de ce projet. En dev, comportement inchangé (Path("profiles"),
+# relatif au CWD). Cf. wardenbot/paths.py pour la distinction complète.
+PROFILES_DIR = data_path("profiles")
 DEFAULT_PROFILE = "Default"
+
+
+def _seed_default_profiles_if_missing() -> None:
+    """Premier lancement d'un .exe packagé : PROFILES_DIR (à côté de l'exe,
+    data_path) n'existe pas encore -- copie les profils par défaut depuis le
+    bundle en lecture seule (resource_path, _internal/profiles) vers cet
+    emplacement inscriptible, en UNE fois. No-op en dev (data_path ==
+    resource_path == même Path("profiles") relatif au CWD -- le dossier
+    existe déjà, rien à copier) et no-op si PROFILES_DIR existe déjà (ne
+    réécrase JAMAIS des profils déjà calibrés par l'utilisateur -- même sur
+    une mise à jour du bundle qui ajouterait un nouveau profil par défaut ;
+    limitation connue, pas un cas mesuré à ce jour).
+
+    EN: First launch of a packaged .exe: PROFILES_DIR (beside the exe,
+    EN: data_path) doesn't exist yet -- copies the default profiles from the
+    EN: read-only bundle (resource_path, _internal/profiles) to this
+    EN: writable location, ONCE. No-op in dev (data_path == resource_path ==
+    EN: the same Path("profiles") relative to the CWD -- the folder already
+    EN: exists, nothing to copy) and no-op if PROFILES_DIR already exists
+    EN: (NEVER overwrites profiles the user has already calibrated -- even
+    EN: on a bundle update that would add a new default profile; a known
+    EN: limitation, not a measured real case yet).
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    if PROFILES_DIR.exists():
+        return
+    bundled = resource_path("profiles")
+    if bundled.is_dir():
+        shutil.copytree(bundled, PROFILES_DIR)
+
+
+_seed_default_profiles_if_missing()
 
 
 class ConfigVersionError(Exception):

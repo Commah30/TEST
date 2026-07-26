@@ -39,6 +39,28 @@
     "vigour": {
       "keybinds": {},
       "regions": {}
+    },
+    "helena": {
+      "keybinds": {
+        "measured_strike": "1",
+        "power_strike": "2",
+        "shield_slam": "3",
+        "shield_throw": "4",
+        "shield_throw_proc": "4",
+        "shockwave": "5",
+        "hold_the_line": "6",
+        "shields_up": "q",
+        "sweeping_strike": "shift+5",
+        "iron_wall": "9"
+      },
+      "regions": {}
+    },
+    "saryn": {
+      "keybinds": {
+        "toxic_lash": "3",
+        "nourish": "4"
+      },
+      "regions": {}
     }
   }
 }

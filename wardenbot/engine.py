@@ -25,9 +25,11 @@ EN: that decides what to press -- no more "I think the hook does that".
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 import traceback
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -370,6 +372,8 @@ def parse_sequences(raw_sequences: "list[dict] | None") -> "list[Sequence]":
 #   fury_above:N        -> state.resources["fury"]*100 >= N
 #   stormfall_above:N   -> state.resources["stormfall"]*100 >= N (Meiko, 2026-07-14 -- entrée des séquences Storm)
 #   earthfall_above:N   -> state.resources["earthfall"]*100 >= N (Meiko, 2026-07-14 -- entrée des séquences Earth)
+#   toughness_above:N   -> state.resources["toughness"]*100 >= N (Helena, 2026-07-18 -- gate Shields Up, cf. config/helena.yaml)
+#   energy_above:N      -> state.resources["energy"] >= N (Saryn/Warframe, 2026-07-20 -- VALEUR ABSOLUE lue en OCR, pas un pourcentage, cf. config/saryn.yaml)
 #   health_below:N / health_above:N
 # EN: Condition evaluation -- tokens separated by commas (AND), prefix "not "
 # EN: for negation.
@@ -383,6 +387,8 @@ def parse_sequences(raw_sequences: "list[dict] | None") -> "list[Sequence]":
 # EN:   fury_above:N        -> state.resources["fury"]*100 >= N
 # EN:   stormfall_above:N   -> state.resources["stormfall"]*100 >= N (Meiko, 2026-07-14 -- Storm sequences entry)
 # EN:   earthfall_above:N   -> state.resources["earthfall"]*100 >= N (Meiko, 2026-07-14 -- Earth sequences entry)
+# EN:   toughness_above:N   -> state.resources["toughness"]*100 >= N (Helena, 2026-07-18 -- gates Shields Up, cf. config/helena.yaml)
+# EN:   energy_above:N      -> state.resources["energy"] >= N (Saryn/Warframe, 2026-07-20 -- ABSOLUTE VALUE read via OCR, not a percentage, cf. config/saryn.yaml)
 # EN:   health_below:N / health_above:N
 # =============================================================================
 def _eval_token(token: str, state: CombatState) -> bool:
@@ -413,6 +419,23 @@ def _eval_token(token: str, state: CombatState) -> bool:
         result = state.resources.get("stormfall", 0.0) * 100 >= float(value)
     elif key == "earthfall_above":
         result = state.resources.get("earthfall", 0.0) * 100 >= float(value)
+    elif key == "toughness_above":
+        result = state.resources.get("toughness", 0.0) * 100 >= float(value)
+    elif key == "energy_above":
+        # Saryn/Warframe (2026-07-20) -- PAS *100 comme les autres tokens
+        # _above : ceux-ci lisent un pourcentage de remplissage de barre
+        # (0.0-1.0, cf. bar_reader.py), l'Énergie Warframe est lue en OCR
+        # (read_digits, wardenbot/ocr.py) comme une VALEUR ABSOLUE (110, 200...)
+        # sur une réserve dont le plafond varie avec les mods -- comparer
+        # directement à la valeur brute, pas à un pourcentage d'un max qui
+        # n'est même pas connu ici.
+        # EN: Saryn/Warframe (2026-07-20) -- NOT *100 like the other _above
+        # EN: tokens: those read a bar-fill percentage (0.0-1.0, cf.
+        # EN: bar_reader.py), Warframe Energy is read via OCR (read_digits,
+        # EN: wardenbot/ocr.py) as an ABSOLUTE VALUE (110, 200...) against a
+        # EN: reserve whose cap varies with mods -- compare directly to the
+        # EN: raw value, not to a percentage of a max that isn't even known here.
+        result = state.resources.get("energy", 0.0) >= float(value)
     elif key == "health_below":
         result = state.health_pct < float(value)
     elif key == "health_above":
@@ -597,6 +620,7 @@ class RotationEngine:
         sequences: "Optional[list[Sequence]]" = None,
         telemetry: Optional[TelemetryWorker] = None,
         weight_overrides: "Optional[dict[str, float]]" = None,
+        shutdown_fn: Optional[Callable[[], None]] = None,
     ):
         """
         press_fn(ability_name)       -> envoie réellement la touche
@@ -694,6 +718,31 @@ class RotationEngine:
         EN:     change. Offsets already clamped to ±MAX_WEIGHT_MODIFIER by
         EN:     load_weight_overrides -- RotationEngine doesn't re-clamp them,
         EN:     it trusts the caller.
+        shutdown_fn (2026-07-18, audit architecture -- fuite confirmée : les
+            threads de détection (state_update.py::_run_meiko_detection_worker/
+            _run_detection_worker) et l'InputWorker (input_sim.py) survivaient
+            indéfiniment à un changement de personnage côté app.py::
+            BotController.set_profile, faute de handle exposé pour les
+            arrêter) : callable optionnel, opaque pour RotationEngine -- il ne
+            connaît PAS le détail de ce qu'il arrête (input worker, stop_event
+            d'un thread de détection...), juste qu'il doit appeler ceci à
+            shutdown(). Construit par build_engine (main.py) à partir de ce
+            qu'IL a lui-même créé. None (défaut) = shutdown() ne fait rien --
+            comportement inchangé pour tout appelant qui n'en a pas besoin
+            (tous les RotationEngine() de test notamment).
+
+        EN: shutdown_fn (2026-07-18, architecture audit -- confirmed leak: the
+        EN:     detection threads (state_update.py::_run_meiko_detection_worker/
+        EN:     _run_detection_worker) and the InputWorker (input_sim.py) used
+        EN:     to survive indefinitely across a character switch on app.py::
+        EN:     BotController.set_profile's side, for lack of an exposed handle
+        EN:     to stop them): optional callable, opaque to RotationEngine -- it
+        EN:     does NOT know the detail of what it stops (input worker, a
+        EN:     detection thread's stop_event...), just that it must call this
+        EN:     on shutdown(). Built by build_engine (main.py) from whatever IT
+        EN:     itself created. None (default) = shutdown() does nothing --
+        EN:     unchanged behavior for any caller that doesn't need it
+        EN:     (notably every test's RotationEngine()).
         """
         self.abilities = abilities
         self.state = state
@@ -705,6 +754,7 @@ class RotationEngine:
         self.state_update_fn = state_update_fn
         self.telemetry = telemetry
         self.weight_overrides = weight_overrides or {}
+        self._shutdown_fn = shutdown_fn
         self.off_gcd_hook_abilities = off_gcd_hook_abilities
         self.sequences = sequences or []
         # Lookup nom -> Sequence -- même principe que _ability_by_name
@@ -725,6 +775,225 @@ class RotationEngine:
         # EN: off_gcd once the winner is decided, without _pick_ability having
         # EN: to carry the whole object inside the Intent.
         self._ability_by_name = {a.name: a for a in abilities}
+
+        # PROTOCOLE DE CONFIRMATION INPUT (audit architecture, 2026-07-18,
+        # point 1 : "une action mise en file est immédiatement considérée
+        # comme réussie"). tick() presse en enregistrant AUSSITÔT cooldown_ms/
+        # GCD sur `now` (la décision), pas sur l'instant réel où InputWorker
+        # exécute la touche (queue.py, cf. input_sim.py) -- nécessaire pour ne
+        # PAS bloquer la boucle de décision sur la vraie durée d'une presse
+        # (35-150ms, cf. HUMANIZE_*). Mais si la presse échoue RÉELLEMENT
+        # (exception pydirectinput) ou est abandonnée (queue pleine, cf.
+        # MAX_QUEUE_SIZE), l'ability restait quand même "verrouillée" par un
+        # cooldown/GCD qui ne s'est jamais produit en jeu -- perte d'une
+        # action complète sans qu'aucun symptôme ne le révèle.
+        #
+        # report_press_outcome(label, success, executed_at) est appelée par
+        # InputWorker (thread séparé -- cf. input_sim.py::on_press_result)
+        # dès qu'une presse aboutit ou échoue vraiment. self._press_outcomes
+        # (queue.Queue, thread-safe SANS verrou manuel nécessaire) est le
+        # SEUL point de contact entre ce thread et celui de la décision --
+        # RotationEngine.tick() la draine en tout début de tick (cf.
+        # _reconcile_press_outcomes) avant de décider quoi que ce soit,
+        # jamais l'inverse (InputWorker n'écrit JAMAIS directement dans
+        # state.cooldown_until/gcd_until -- ce serait une course de données
+        # sur un dict Python ordinaire, non protégé).
+        #
+        # Portée VOLONTAIREMENT limitée à l'échec/l'abandon (success=True ->
+        # no-op, cf. _reconcile_press_outcomes) : corriger aussi le cas
+        # succès (petit ajustement de cooldown_until vers l'instant réel
+        # d'exécution, généralement <150ms d'écart, cf. données réelles
+        # input_timing.log) apporterait peu pour un risque de régression
+        # disproportionné -- ce protocole répond spécifiquement au risque
+        # identifié par l'audit (agir comme si une action avait réussi alors
+        # qu'elle a échoué), pas à un raffinement de précision temporelle.
+        #
+        # _pending_receipts : "reçus" posés PAR ce même thread (tick()) juste
+        # après record_cast/gcd_until (cf. _record_press_receipt), une file
+        # FIFO PAR ability -- comparés à la valeur ACTUELLE au moment de la
+        # réconciliation (compare-and-clear) avant de rien annuler : si une
+        # presse PLUS RÉCENTE de la même ability a déjà redéfini
+        # cooldown_until/gcd_until entre-temps, l'échec tardif d'une VIEILLE
+        # presse ne doit PAS écraser un verrou légitime et plus récent (cf.
+        # _reconcile_press_outcomes pour le détail -- une seule valeur par nom
+        # ne suffisait PAS, trouvé via un test de non-régression).
+        # EN: INPUT CONFIRMATION PROTOCOL (architecture audit, 2026-07-18,
+        # EN: point 1: "a queued action is immediately considered
+        # EN: successful"). tick() presses while recording cooldown_ms/GCD
+        # EN: IMMEDIATELY on `now` (decision time), not on the real instant
+        # EN: InputWorker actually executes the key (cf. input_sim.py) --
+        # EN: necessary so the decision loop does NOT block on a press's real
+        # EN: duration (35-150ms, cf. HUMANIZE_*). But if the press REALLY
+        # EN: fails (pydirectinput exception) or gets dropped (queue full, cf.
+        # EN: MAX_QUEUE_SIZE), the ability stayed "locked" by a cooldown/GCD
+        # EN: that never actually happened in-game -- a whole action lost with
+        # EN: no symptom revealing it.
+        # EN:
+        # EN: report_press_outcome(label, success, executed_at) is called by
+        # EN: InputWorker (a separate thread -- cf. input_sim.py::
+        # EN: on_press_result) as soon as a press truly succeeds or fails.
+        # EN: self._press_outcomes (queue.Queue, thread-safe with no manual
+        # EN: lock needed) is the ONLY contact point between that thread and
+        # EN: the decision one -- RotationEngine.tick() drains it at the very
+        # EN: start of each tick (cf. _reconcile_press_outcomes) before
+        # EN: deciding anything, never the other way around (InputWorker NEVER
+        # EN: writes directly into state.cooldown_until/gcd_until -- that would
+        # EN: be a data race on a plain, unprotected Python dict).
+        # EN:
+        # EN: Scope DELIBERATELY limited to failure/drop (success=True ->
+        # EN: no-op, cf. _reconcile_press_outcomes): also correcting the
+        # EN: success case (a small cooldown_until adjustment toward the real
+        # EN: execution instant, generally <150ms off, cf. real
+        # EN: input_timing.log data) would bring little value for a
+        # EN: disproportionate regression risk -- this protocol specifically
+        # EN: answers the risk the audit identified (acting as if an action
+        # EN: succeeded when it failed), not a timing-precision refinement.
+        # EN:
+        # EN: _pending_receipts: "receipts" set BY this same thread (tick())
+        # EN: right after record_cast/gcd_until (cf. _record_press_receipt), a
+        # EN: FIFO queue PER ability -- compared against the CURRENT value at
+        # EN: reconciliation time (compare-and-clear) before undoing anything:
+        # EN: if a MORE RECENT press of the same ability already redefined
+        # EN: cooldown_until/gcd_until in the meantime, a late failure from an
+        # EN: OLD press must NOT clobber a legitimate, more
+        # EN: recent lock.
+        self._press_outcomes: "queue.Queue[tuple[str, bool, float]]" = queue.Queue()
+        # PAR ABILITY, PAS UNE SEULE VALEUR (bug trouvé en écrivant le test de
+        # non-régression ci-dessous, cf. test_press_confirmation_failure_
+        # does_not_clobber_a_newer_press) : une seule valeur par nom écrasée à
+        # chaque presse ne peut PAS distinguer "cette confirmation concerne
+        # la presse la plus récente" de "elle concerne une presse plus
+        # ancienne, déjà remplacée" quand la MÊME ability est pressée deux
+        # fois avant que la 1re confirmation n'arrive (rare mais réel --
+        # off_gcd, ou GCD neutralisé entre deux ticks). Une file (deque) PAR
+        # ability restaure le bon ordre : chaque presse empile son reçu,
+        # chaque confirmation dépile le PLUS ANCIEN reçu de CETTE ability
+        # (popleft) -- FIFO garanti car InputWorker traite sa queue dans
+        # l'ordre d'arrivée, jamais en parallèle. Le compare-and-clear final
+        # se fait quand même contre la valeur ACTUELLE de cooldown_until/
+        # gcd_until (pas seulement l'ordre) : gère correctement le cas
+        # croisé entre 2 abilities DIFFÉRENTES qui partagent gcd_until (cf.
+        # plus bas, _reconcile_press_outcomes).
+        # EN: PER ABILITY, NOT A SINGLE VALUE (bug found while writing the
+        # EN: regression test below, cf. test_press_confirmation_failure_
+        # EN: does_not_clobber_a_newer_press): a single value per name
+        # EN: overwritten on every press CANNOT distinguish "this confirmation
+        # EN: is about the most recent press" from "it's about an older one,
+        # EN: already superseded" when the SAME ability is pressed twice
+        # EN: before the 1st confirmation arrives (rare but real -- off_gcd,
+        # EN: or GCD neutralized between two ticks). A queue (deque) PER
+        # EN: ability restores the right order: each press pushes its
+        # EN: receipt, each confirmation pops the OLDEST receipt for THAT
+        # EN: ability (popleft) -- FIFO guaranteed since InputWorker processes
+        # EN: its queue in arrival order, never in parallel. The final
+        # EN: compare-and-clear still happens against the CURRENT value of
+        # EN: cooldown_until/gcd_until (not just ordering): correctly handles
+        # EN: the cross case between 2 DIFFERENT abilities sharing gcd_until
+        # EN: (cf. below, _reconcile_press_outcomes).
+        self._pending_receipts: "dict[str, deque[tuple[Optional[float], Optional[float]]]]" = defaultdict(deque)
+
+    def report_press_outcome(self, label: str, success: bool, executed_at: float) -> None:
+        """Point d'entrée THREAD-SAFE pour InputWorker (cf. input_sim.py::
+        on_press_result) -- appelable depuis N'IMPORTE QUEL thread, y compris
+        celui d'input. Ne fait qu'empiler dans self._press_outcomes
+        (queue.Queue.put(), thread-safe sans verrou) -- la réconciliation
+        elle-même n'a lieu que sur le thread de décision, cf.
+        _reconcile_press_outcomes.
+
+        EN: THREAD-SAFE entry point for InputWorker (cf. input_sim.py::
+        EN: on_press_result) -- callable from ANY thread, including the input
+        EN: one. Only stacks onto self._press_outcomes (queue.Queue.put(),
+        EN: thread-safe with no lock) -- the reconciliation itself only
+        EN: happens on the decision thread, cf. _reconcile_press_outcomes.
+        """
+        self._press_outcomes.put((label, success, executed_at))
+
+    def _record_press_receipt(self, pressed: str, cooldown_ms: int, gcd_was_set: bool) -> None:
+        """Appelée juste après record_cast()/la mise à jour de gcd_until,
+        dans les deux branches de tick() qui pressent réellement -- empile un
+        reçu (cooldown_until assigné ou None, gcd_until assigné ou None) dans
+        self._pending_receipts[pressed] pour que _reconcile_press_outcomes
+        puisse dépiler le PLUS ANCIEN reçu de CETTE ability à la confirmation
+        (FIFO, cf. docstring de __init__ plus haut -- pas juste "le dernier
+        connu")."""
+        assigned_cooldown = self.state.cooldown_until.get(pressed) if cooldown_ms > 0 else None
+        assigned_gcd = self.state.gcd_until if gcd_was_set else None
+        if assigned_cooldown is not None or assigned_gcd is not None:
+            self._pending_receipts[pressed].append((assigned_cooldown, assigned_gcd))
+
+    def _reconcile_press_outcomes(self, now: float) -> None:
+        """Draine self._press_outcomes (non-bloquant -- get_nowait() jusqu'à
+        Empty) EN TOUT DÉBUT de tick(), avant toute décision. Dépile TOUJOURS
+        le reçu le plus ancien de state._pending_receipts[label] (FIFO, cf.
+        docstring de __init__) qu'il y ait succès ou échec -- sinon le reçu
+        d'une presse réussie resterait empilé indéfiniment (fuite mémoire sur
+        une longue session, cf. audit).
+
+        success=True -> reçu simplement consommé, rien d'autre à faire (cf.
+        portée du protocole, docstring __init__). success=False ->
+        compare-and-clear : n'annule cooldown_until[label]/gcd_until QUE si
+        chacun vaut ENCORE exactement ce que CE reçu précis avait assigné --
+        si une presse plus récente (même ability pour le cooldown, N'IMPORTE
+        QUELLE ability pour le GCD partagé) les a déjà redéfinis entre-temps,
+        on laisse ce verrou plus récent et légitime tranquille.
+
+        EN: Drains self._press_outcomes (non-blocking -- get_nowait() until
+        EN: Empty) at the very START of tick(), before any decision. ALWAYS
+        EN: pops the oldest receipt from state._pending_receipts[label]
+        EN: (FIFO, cf. __init__'s docstring) whether success or failure --
+        EN: otherwise a successful press's receipt would stay stacked forever
+        EN: (a memory leak over a long session, cf. the audit).
+        EN:
+        EN: success=True -> receipt simply consumed, nothing else to do (cf.
+        EN: the protocol's scope, __init__'s docstring). success=False ->
+        EN: compare-and-clear: only undoes cooldown_until[label]/gcd_until IF
+        EN: each STILL equals exactly what THIS specific receipt assigned --
+        EN: if a more recent press (same ability for the cooldown, ANY
+        EN: ability for the shared GCD) already redefined them in the
+        EN: meantime, that more recent, legitimate lock is left alone.
+        """
+        while True:
+            try:
+                label, success, executed_at = self._press_outcomes.get_nowait()
+            except queue.Empty:
+                return
+
+            receipts = self._pending_receipts.get(label)
+            if not receipts:
+                continue   # rien à réconcilier pour cette ability (ex: cooldown_ms=0 ET off_gcd -- aucun reçu n'a jamais été empilé)
+            assigned_cooldown, assigned_gcd = receipts.popleft()
+            if not receipts:
+                self._pending_receipts.pop(label, None)   # évite d'accumuler des deques vides pour chaque ability jamais rejouée
+
+            if success:
+                continue
+
+            if assigned_cooldown is not None and self.state.cooldown_until.get(label) == assigned_cooldown:
+                self.state.cooldown_until.pop(label, None)
+
+            if assigned_gcd is not None and self.state.gcd_until == assigned_gcd:
+                self.state.gcd_until = executed_at   # libère le GCD -- la presse n'a jamais eu lieu · EN: frees the GCD -- the press never happened
+
+    def shutdown(self) -> None:
+        """Arrête proprement les ressources externes liées à ce moteur (cf.
+        shutdown_fn ci-dessus) -- à appeler explicitement par l'appelant
+        (build_engine ne le fait PAS automatiquement, ni run_forever à sa
+        sortie : un appelant qui tourne en dry-run/test, ou qui veut réutiliser
+        le même InputWorker pour un futur moteur, ne doit pas se le faire
+        couper sous le pied). Idempotent seulement si shutdown_fn lui-même
+        l'est (cf. InputWorker.stop()/threading.Event.set(), tous deux
+        rappelables sans effet de bord).
+
+        EN: Cleanly stops the external resources tied to this engine (cf.
+        EN: shutdown_fn above) -- must be called explicitly by the caller
+        EN: (build_engine does NOT do it automatically, nor does run_forever on
+        EN: exit: a caller running in dry-run/test, or one that wants to reuse
+        EN: the same InputWorker for a future engine, shouldn't have it pulled
+        EN: out from under them). Idempotent only if shutdown_fn itself is (cf.
+        EN: InputWorker.stop()/threading.Event.set(), both safely re-callable).
+        """
+        if self._shutdown_fn is not None:
+            self._shutdown_fn()
 
     def _safe_is_ready(self, *args) -> "tuple[bool, Optional[str]]":
         """Appelle is_ready_fn en isolant ses exceptions. Retourne
@@ -950,6 +1219,19 @@ class RotationEngine:
         """
         now = time.monotonic()
 
+        # Réconciliation des presses (audit architecture, 2026-07-18, cf.
+        # docstring de __init__) -- EN TOUT PREMIER, avant même
+        # state_update_fn : une presse dont l'échec vient d'être confirmé par
+        # InputWorker doit libérer son cooldown/GCD AVANT que ce tick ne
+        # décide quoi que ce soit, sans quoi la correction arriverait un tick
+        # trop tard.
+        # EN: Press reconciliation (architecture audit, 2026-07-18, cf.
+        # EN: __init__'s docstring) -- FIRST THING, even before
+        # EN: state_update_fn: a press whose failure InputWorker just
+        # EN: confirmed must free its cooldown/GCD BEFORE this tick decides
+        # EN: anything, or the correction would land one tick too late.
+        self._reconcile_press_outcomes(now)
+
         if self.state_update_fn is not None:
             self.state_update_fn(self.state)
 
@@ -1103,18 +1385,57 @@ class RotationEngine:
             cooldown_ms = ability.cooldown_ms
             self.press_fn(pressed)
             self.state.record_cast(pressed, now, cooldown_ms)
-            if not ability.off_gcd:
+            gcd_will_be_set = not ability.off_gcd
+            if gcd_will_be_set:
                 self.state.gcd_until = now + self.gcd_ms / 1000.0
+            self._record_press_receipt(pressed, cooldown_ms, gcd_will_be_set)
         elif winner is not None:
             pressed = winner.ability
             self.press_fn(pressed)
-            self.state.record_cast(pressed, now, 0)
+            # BUG CONFIRMÉ (audit architecture, 2026-07-17) : cooldown_ms=0 codé
+            # en dur ici depuis toujours -- une ability gagnée par un hook/une
+            # séquence n'enregistrait donc JAMAIS son vrai cooldown (record_cast
+            # posait cooldown_until=now, déjà expiré au tick suivant). Sans
+            # effet visible pour Meiko (spirit_palm/*_2/fighting_techniques ne
+            # sont pas déclarées dans abilities:, gérées par GCD/FINISHER_DELAY_S
+            # côté hooks.py, pas par cooldown_until) mais CRITIQUE pour Vigour :
+            # TOUTES ses abilities (dawnbreaker_orb 9.97s, luminous_barrier
+            # 19.94s, circle_of_light 14.95s, remove_magic 6s...) sont proposées
+            # par le hook (jamais par le scan, skip_detection:true) -- leur
+            # is_on_cooldown(...) côté hooks.py (cf. vigour_pre_tick) lisait donc
+            # TOUJOURS False, quel que soit le vrai cooldown. Fix : même lookup
+            # que la branche scan_intent ci-dessus -- si `pressed` est une
+            # ability déclarée (abilities: du YAML), on utilise son VRAI
+            # cooldown_ms ; sinon (combo pieces Meiko, touches de ciblage
+            # jamais déclarées) le comportement d'origine (0) est inchangé.
+            # EN: CONFIRMED BUG (architecture audit, 2026-07-17): cooldown_ms=0
+            # EN: hardcoded here from the start -- an ability won by a hook/
+            # EN: sequence therefore NEVER recorded its real cooldown
+            # EN: (record_cast set cooldown_until=now, already expired by the
+            # EN: next tick). No visible effect for Meiko (spirit_palm/*_2/
+            # EN: fighting_techniques aren't declared in abilities:, gated by
+            # EN: GCD/FINISHER_DELAY_S in hooks.py, not by cooldown_until) but
+            # EN: CRITICAL for Vigour: ALL its abilities (dawnbreaker_orb 9.97s,
+            # EN: luminous_barrier 19.94s, circle_of_light 14.95s, remove_magic
+            # EN: 6s...) are proposed by the hook (never the scan,
+            # EN: skip_detection:true) -- their is_on_cooldown(...) in hooks.py
+            # EN: (cf. vigour_pre_tick) therefore ALWAYS read False, regardless
+            # EN: of the real cooldown. Fix: same lookup as the scan_intent
+            # EN: branch above -- if `pressed` is a declared ability (YAML
+            # EN: abilities:), use its REAL cooldown_ms; otherwise (Meiko combo
+            # EN: pieces, never-declared target-select keys) the original
+            # EN: behavior (0) is unchanged.
+            hook_ability = self._ability_by_name.get(pressed)
+            hook_cooldown_ms = hook_ability.cooldown_ms if hook_ability is not None else 0
+            self.state.record_cast(pressed, now, hook_cooldown_ms)
             self.state.debug_choice_reason = (
                 f"décidé par {winner.source} (poids={winner.weight}, effectif={self._effective_weight(winner):.1f}, "  # EN: decided by <source> (weight=<weight>, effective=<effective_weight>,
                 f"court-circuite le scan de priorité)"  # EN: short-circuits the priority scan)
             )
-            if pressed not in self.off_gcd_hook_abilities:
+            gcd_will_be_set = pressed not in self.off_gcd_hook_abilities
+            if gcd_will_be_set:
                 self.state.gcd_until = now + self.gcd_ms / 1000.0
+            self._record_press_receipt(pressed, hook_cooldown_ms, gcd_will_be_set)
             if winner is sequence_intent:
                 # Le step proposé par la séquence a RÉELLEMENT gagné ce tick
                 # (pas juste le hook qui aurait proposé la même ability par
