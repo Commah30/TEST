@@ -86,7 +86,7 @@ except ImportError:
 
 sys.path.insert(0, str(Path(__file__).parent))
 from main import REGIONS, TARIQ_BUFF_BAR_THRESHOLDS  # noqa: E402
-from wardenbot.yolo_detect import detect_with_boxes  # noqa: E402
+from wardenbot.yolo_detect import TARIQ_YOLO_WEIGHTS_PATH, detect_with_boxes  # noqa: E402
 
 # Seuils d'AUTO-LABELLISATION seulement (pas des seuils de prod) --
 # spirited_vortex/spirited_strikes abaissés délibérément (cf. docstring du
@@ -200,16 +200,16 @@ def auto_label_yolo(crop: np.ndarray, conf: float, class_names: list[str]) -> li
     la même icône, bug déjà rencontré) se fait après coup sur le dataset
     complet, pas ici image par image.
 
-    NB : detect_with_boxes (wardenbot/yolo_detect.py) charge UN SEUL modèle
-    (YOLO_WEIGHTS_PATH, celui de Tariq) -- ce mode --yolo-labels ne sert donc
-    qu'à re-bootstrapper un dataset Tariq avec le modèle Tariq déjà entraîné.
-    Pas encore de modèle Meiko à charger ici tant que train_yolo.py n'a pas
-    tourné une 1re fois sur dataset_meiko_buffs -- le mode template
-    (auto_label ci-dessus) est le seul valable pour un tout premier dataset
-    Meiko."""
+    NB : ce mode --yolo-labels charge explicitement TARIQ_YOLO_WEIGHTS_PATH
+    (wardenbot/yolo_detect.py, weights_path désormais obligatoire partout --
+    2026-07-26, généricité du moteur) -- ne sert donc qu'à re-bootstrapper un
+    dataset Tariq avec le modèle Tariq déjà entraîné. Pas encore de modèle
+    Meiko à charger ici tant que train_yolo.py n'a pas tourné une 1re fois
+    sur dataset_meiko_buffs -- le mode template (auto_label ci-dessus) est
+    le seul valable pour un tout premier dataset Meiko."""
     name_to_id = {name: i for i, name in enumerate(class_names)}
     best: dict[str, tuple[float, tuple[float, float, float, float]]] = {}
-    for class_name, confidence, box in detect_with_boxes(crop, conf=conf):
+    for class_name, confidence, box in detect_with_boxes(crop, conf=conf, weights_path=TARIQ_YOLO_WEIGHTS_PATH):
         if class_name not in name_to_id:
             continue
         if confidence > best.get(class_name, (0.0, None))[0]:

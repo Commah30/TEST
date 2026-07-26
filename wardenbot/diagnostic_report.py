@@ -95,9 +95,16 @@ def check_capture() -> DiagnosticCheck:
 
 
 def check_yolo_loaded() -> DiagnosticCheck:
+    """Smoke-test générique "le pipeline YOLO/ultralytics fonctionne-t-il
+    DU TOUT ?" -- PAS "le modèle DU personnage actif charge-t-il ?" (Helena/
+    Vigour/Saryn n'utilisent même pas YOLO). TARIQ_YOLO_WEIGHTS_PATH sert ici
+    juste de cible connue-fonctionnelle pour le test, sans rapport avec le
+    personnage réellement sélectionné (cf. wardenbot/yolo_detect.py,
+    weights_path désormais obligatoire partout -- 2026-07-26, généricité du
+    moteur)."""
     try:
-        from wardenbot.yolo_detect import _get_model
-        _get_model()
+        from wardenbot.yolo_detect import TARIQ_YOLO_WEIGHTS_PATH, _get_model
+        _get_model(TARIQ_YOLO_WEIGHTS_PATH)
         return DiagnosticCheck("Modèle YOLO", SEVERITY_OK, "Modèle chargé avec succès.")
     except Exception as exc:
         return DiagnosticCheck(

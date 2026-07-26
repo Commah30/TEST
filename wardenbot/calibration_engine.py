@@ -20,6 +20,7 @@ AUCUNE logique de détection, il les enchaîne juste et formate le résultat.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -49,12 +50,17 @@ class CalibrationResult:
     error: Optional[str] = None
 
 
-def analyze_yolo_crop(crop: np.ndarray, region: dict, conf: float = 0.4) -> CalibrationResult:
-    """Pour la barre de buffs Tariq -- exécute le modèle YOLO entraîné sur
-    le crop, résume les classes détectées + confiance (triées, la plus
-    confiante en premier)."""
+def analyze_yolo_crop(crop: np.ndarray, region: dict, weights_path: Path, conf: float = 0.4) -> CalibrationResult:
+    """Exécute le modèle YOLO entraîné (weights_path) sur le crop, résume les
+    classes détectées + confiance (triées, la plus confiante en premier).
+
+    weights_path : OBLIGATOIRE (2026-07-26, généricité du moteur, cf.
+    wardenbot/yolo_detect.py) -- ce module ne présume plus d'un personnage
+    précis (Tariq) ; l'appelant (calibration_wizard.py, via son
+    REGION_SPECS) fournit le chemin de poids du personnage réellement
+    calibré."""
     try:
-        found = detect(crop, conf=conf)
+        found = detect(crop, conf=conf, weights_path=weights_path)
     except Exception as exc:
         return CalibrationResult(region=region, kind=KIND_YOLO, crop=crop, summary="", success=False, error=str(exc))
 

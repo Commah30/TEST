@@ -29,7 +29,7 @@ from wardenbot.engine import CombatState
 from wardenbot.freshness import DetectionMeta, FreshnessPolicy
 from wardenbot.matcher import TemplateMatcher
 from wardenbot.ocr import read_countdown_seconds, read_digits
-from wardenbot.yolo_detect import MEIKO_YOLO_WEIGHTS_PATH, detect, detect_with_boxes, get_last_predict_speed_ms
+from wardenbot.yolo_detect import MEIKO_YOLO_WEIGHTS_PATH, TARIQ_YOLO_WEIGHTS_PATH, detect, detect_with_boxes, get_last_predict_speed_ms
 
 # =============================================================================
 # Fraîcheur (Phase 0, 2026-07-14, cf. discussion architecture) : une politique
@@ -1039,7 +1039,7 @@ def make_tariq_state_update_fn(capturer: ScreenCapture, matcher: TemplateMatcher
                 # EN: threshold AFTER the fact -- if we already filtered at 0.4
                 # EN: here, a 0.25 confidence during a genuinely active buff
                 # EN: would be lost before even reaching the hysteresis logic.
-                last_yolo_detect["found"] = detect(frame, conf=TARIQ_BUFF_CONF_LOW)
+                last_yolo_detect["found"] = detect(frame, conf=TARIQ_BUFF_CONF_LOW, weights_path=TARIQ_YOLO_WEIGHTS_PATH)
                 _yolo_dur = time.monotonic() - _t0
                 stages["yolo_wrapper_total_ms"] = _yolo_dur * 1000
                 # Décomposition GRATUITE fournie par ultralytics lui-même

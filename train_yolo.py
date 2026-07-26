@@ -14,7 +14,8 @@ sur cette machine) -- quelques minutes pour ce volume de données/classes,
 pas des heures.
 
 Résultat : runs/detect/train*/weights/best.pt -- c'est le fichier à pointer
-depuis wardenbot/yolo_detect.py (YOLO_WEIGHTS_PATH) une fois satisfait des
+depuis wardenbot/yolo_detect.py (TARIQ_YOLO_WEIGHTS_PATH ou
+MEIKO_YOLO_WEIGHTS_PATH selon le personnage) une fois satisfait des
 métriques affichées en fin de run (précision/rappel par classe).
 """
 from __future__ import annotations

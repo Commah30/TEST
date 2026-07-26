@@ -37,13 +37,17 @@ from wardenbot.config_manager import PROFILES_DIR, SUPPORTED_CONFIG_VERSION, Con
 from wardenbot.matcher import TemplateMatcher
 from wardenbot.region_selector import select_region_interactively
 from wardenbot.state_update import HAMMER_STORM_CAST_BAR_FILL_BGR, RAGE_BAR_FILL_BGR
+from wardenbot.yolo_detect import TARIQ_YOLO_WEIGHTS_PATH
 
 # Régions Tariq dont l'aperçu de calibration N'EST PAS un simple template
 # match (cas par défaut) -- réutilise les MÊMES constantes que
 # state_update.py, jamais dupliquées, pour ne jamais diverger de ce que le
 # moteur utilise réellement en jeu.
 _TARIQ_SPECIAL_REGIONS: dict = {
-    "tariq_buff_bar": {"detector_kind": KIND_YOLO, "conf": 0.4},
+    # weights_path OBLIGATOIRE désormais (2026-07-26, généricité du moteur,
+    # cf. wardenbot/yolo_detect.py -- analyze_yolo_crop ne défaute plus sur
+    # les poids Tariq en interne).
+    "tariq_buff_bar": {"detector_kind": KIND_YOLO, "conf": 0.4, "weights_path": TARIQ_YOLO_WEIGHTS_PATH},
     "rage_bar": {"detector_kind": KIND_BAR, "fill_bgr": RAGE_BAR_FILL_BGR, "direction": "ltr", "tolerance": 50, "max_gap": 6},
     "hammer_storm_cast_bar": {"detector_kind": KIND_BAR, "fill_bgr": HAMMER_STORM_CAST_BAR_FILL_BGR, "direction": "ltr", "tolerance": 60},
 }

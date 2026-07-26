@@ -23,7 +23,7 @@ except ImportError:
     cv2 = None
 
 from wardenbot.capture import ScreenCapture
-from wardenbot.yolo_detect import detect
+from wardenbot.yolo_detect import TARIQ_YOLO_WEIGHTS_PATH, detect
 from main import REGIONS
 
 # Seuil très bas pour le diagnostic -- si le vrai buff est actif mais que
@@ -49,7 +49,7 @@ def main():
             if cv2 is not None:
                 cv2.imwrite(DEBUG_FRAME_PATH, frame)
 
-            found = detect(frame, conf=DEBUG_CONF)
+            found = detect(frame, conf=DEBUG_CONF, weights_path=TARIQ_YOLO_WEIGHTS_PATH)
             if found:
                 parts = [
                     f"{name}: {conf:.2f}{'' if conf >= 0.4 else ' (sous le seuil 0.4)'}"
