@@ -94,6 +94,12 @@ CHARACTERS = {
         # est le finisher off-GCD de Meiko), juste rendu explicite ici plutôt
         # qu'implicite dans engine.py.
         "off_gcd_hook_abilities": frozenset({"fighting_techniques"}),
+        # game_window_title_hint (2026-07-26, généricité du moteur) : utilisé
+        # par diagnostics.py::check_foreground_window et
+        # environment_detect.py::find_window_by_title_hint, qui ne défautent
+        # plus sur "fellowship" en dur -- cf. diagnostics.py pour le bug latent
+        # Saryn/Warframe que ça évite désormais.
+        "game_window_title_hint": "fellowship",
     },
     "tariq": {
         "config": "config/tariq.yaml",
@@ -125,6 +131,7 @@ CHARACTERS = {
         # partir -- seul le voile GCD (diagnostic, cf. hooks.py) s'en sert,
         # et son absence dégrade l'observabilité, ne casse rien.
         "required_regions": ["rage_bar", "tariq_buff_bar"],
+        "game_window_title_hint": "fellowship",
     },
     "vigour": {
         "config": "config/vigour.yaml",
@@ -171,6 +178,7 @@ CHARACTERS = {
         # EN: list (not all 4 slots nor the debuff regions), same principle as
         # EN: Meiko/Tariq.
         "required_regions": ["party_1_hp"],
+        "game_window_title_hint": "fellowship",
     },
     "helena": {
         # 2026-07-18, premier portage ; 2026-07-19, cablage reel (templates
@@ -210,6 +218,7 @@ CHARACTERS = {
         # EN: it. Short list, same principle as the other characters: the
         # EN: minimum without which a central decision breaks.
         "required_regions": ["toughness_bar", "helena_buff_bar"],
+        "game_window_title_hint": "fellowship",
     },
     "saryn": {
         # 2026-07-20, PREMIER PERSONNAGE HORS FELLOWSHIP (Warframe). Assistant
@@ -274,5 +283,31 @@ CHARACTERS = {
         # EN: (toughness_bar/helena_buff_bar): the minimum without which a
         # EN: central decision breaks rather than degrading cleanly.
         "required_regions": ["energy", "toxic_lash", "nourish"],
+        # "warframe", PAS "fellowship" (2026-07-26, généricité du moteur --
+        # FIX D'UN BUG LATENT) : diagnostics.py::check_foreground_window et
+        # environment_detect.py::find_window_by_title_hint défautaient tous
+        # les deux sur "fellowship" (constante en dur, GAME_WINDOW_TITLE_HINT)
+        # -- pour Saryn, dont le jeu réel est Warframe, ce défaut n'aurait
+        # JAMAIS pu matcher le vrai titre de fenêtre. Concrètement :
+        # check_foreground_window aurait dû logger un faux "focus volé" à
+        # CHAQUE presse en jouant Saryn (jamais remarqué car purement
+        # informatif, cf. diagnostics.py) ; find_window_by_title_hint (bouton
+        # Diagnostic) aurait dit à tort "jeu non détecté" même Warframe
+        # ouvert. Corrigé en rendant le hint explicite par personnage plutôt
+        # qu'un défaut global codé en dur dans le core.
+        # EN: "warframe", NOT "fellowship" (2026-07-26, engine genericity --
+        # EN: FIXING A LATENT BUG): diagnostics.py::check_foreground_window
+        # EN: and environment_detect.py::find_window_by_title_hint both used
+        # EN: to default to "fellowship" (hardcoded constant,
+        # EN: GAME_WINDOW_TITLE_HINT) -- for Saryn, whose real game is
+        # EN: Warframe, that default could NEVER have matched the real window
+        # EN: title. Concretely: check_foreground_window should have logged a
+        # EN: false "focus stolen" on EVERY press while playing Saryn (never
+        # EN: noticed since it's purely informational, cf. diagnostics.py);
+        # EN: find_window_by_title_hint (Diagnostic button) would have
+        # EN: wrongly said "game not detected" even with Warframe open. Fixed
+        # EN: by making the hint explicit per character rather than a global
+        # EN: hardcoded default in core.
+        "game_window_title_hint": "warframe",
     },
 }

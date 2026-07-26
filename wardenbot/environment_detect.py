@@ -18,8 +18,6 @@ import ctypes
 from dataclasses import dataclass
 from typing import Optional
 
-from wardenbot.diagnostics import GAME_WINDOW_TITLE_HINT
-
 
 @dataclass
 class MonitorInfo:
@@ -74,12 +72,25 @@ def list_monitors() -> list[MonitorInfo]:
     return monitors
 
 
-def find_window_by_title_hint(hint: str = GAME_WINDOW_TITLE_HINT) -> Optional[str]:
+def find_window_by_title_hint(hint: str) -> Optional[str]:
     """Cherche une fenêtre visible dont le titre contient `hint` (insensible
     à la casse) -- retourne le titre exact trouvé, ou None si le jeu ne
-    semble pas ouvert. Réutilise GAME_WINDOW_TITLE_HINT (diagnostics.py) par
-    défaut plutôt que de dupliquer la chaîne "fellowship" -- une seule
-    source de vérité pour "à quoi ressemble le titre du jeu"."""
+    semble pas ouvert.
+
+    `hint` : PAS de défaut (2026-07-26, généricité du moteur) -- défautait
+    avant sur GAME_WINDOW_TITLE_HINT (diagnostics.py, "fellowship" codé en
+    dur), un bug latent pour Saryn/Warframe (cf. diagnostics.py::
+    check_foreground_window pour le détail). L'appelant fournit désormais
+    la valeur pour le jeu actif (cf. game_config.py::CHARACTERS[character]
+    ["game_window_title_hint"]).
+
+    EN: `hint`: NO default (2026-07-26, engine genericity) -- used to
+    EN: default to GAME_WINDOW_TITLE_HINT (diagnostics.py, hardcoded
+    EN: "fellowship"), a latent bug for Saryn/Warframe (cf.
+    EN: diagnostics.py::check_foreground_window for details). The caller now
+    EN: supplies the value for the active game (cf.
+    EN: game_config.py::CHARACTERS[character]["game_window_title_hint"]).
+    """
     found: list[str] = []
     hint_lower = hint.lower()
 

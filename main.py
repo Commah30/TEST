@@ -318,9 +318,14 @@ def build_engine(
     # décision -- plus précis : vérifie l'état du focus au moment où la
     # touche part VRAIMENT, pas au moment où le tick l'a décidée (la queue
     # peut, rarement, introduire un léger décalage entre les deux).
+    # cfg["game_window_title_hint"] (2026-07-26, généricité du moteur) : le
+    # jeu actif dépend du personnage (Saryn = Warframe, tout le reste =
+    # Fellowship) -- passer une valeur codée en dur dans diagnostics.py
+    # aurait été un faux positif systématique pour Saryn (cf. diagnostics.py
+    # ::check_foreground_window pour le détail du bug latent corrigé).
     def _check_focus_before_press(name: str) -> None:
         if not dry_run:
-            check_foreground_window(name)
+            check_foreground_window(name, cfg["game_window_title_hint"])
 
     input_worker = InputWorker(input_sim, on_before_press=_check_focus_before_press)
 

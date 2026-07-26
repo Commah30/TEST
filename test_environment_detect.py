@@ -40,18 +40,23 @@ def test_find_window_by_title_hint_returns_none_for_nonexistent_window():
     print("Fenêtre inexistante -> None, comme attendu.")
 
 
-def test_find_window_by_title_hint_does_not_crash_with_default_hint():
+def test_find_window_by_title_hint_does_not_crash_with_a_real_game_hint():
     """Ne vérifie pas que le jeu EST ouvert (dépend de la machine qui lance
-    le test) -- juste que l'appel avec le hint par défaut (GAME_WINDOW_TITLE_HINT)
-    ne plante jamais, jeu ouvert ou non."""
-    result = find_window_by_title_hint()
+    le test) -- juste que l'appel avec un hint de jeu réel ne plante jamais,
+    jeu ouvert ou non. find_window_by_title_hint() n'a plus de défaut
+    (2026-07-26, généricité du moteur -- cf. wardenbot/diagnostics.py) :
+    chaque appelant fournit désormais explicitement le hint du personnage
+    actif (game_config.py::CHARACTERS[character]["game_window_title_hint"]),
+    donc ce test en fixe un lui-même plutôt que de dépendre d'un défaut qui
+    n'existe plus."""
+    result = find_window_by_title_hint("fellowship")
     assert result is None or isinstance(result, str)
-    print(f"find_window_by_title_hint() par défaut : {result!r} (pas de crash).")
+    print(f"find_window_by_title_hint('fellowship') : {result!r} (pas de crash).")
 
 
 if __name__ == "__main__":
     test_get_primary_resolution_returns_sane_dimensions()
     test_list_monitors_finds_at_least_one_with_exactly_one_primary()
     test_find_window_by_title_hint_returns_none_for_nonexistent_window()
-    test_find_window_by_title_hint_does_not_crash_with_default_hint()
+    test_find_window_by_title_hint_does_not_crash_with_a_real_game_hint()
     print("\nTous les tests passent.")

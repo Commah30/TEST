@@ -175,20 +175,38 @@ def log_pipeline_diagnostic(
 # T -- si un overlay (Xbox Game Bar utilisé pour enregistrer, Discord...)
 # vole le focus ne serait-ce qu'une frame, la presse "réussit" côté Windows
 # mais le jeu ne la voit jamais, sans que rien ne puisse le détecter côté
-# software. GAME_WINDOW_TITLE_HINT est une estimation ("Fellowship") --
-# PAS confirmée (le jeu n'était pas lancé au moment d'écrire ce code) : si
-# le titre réel diffère, à corriger avant de tirer des conclusions de ce
-# log.
-GAME_WINDOW_TITLE_HINT = "fellowship"
+# software.
 FOCUS_LOG_PATH = data_path("focus_check.log")
 
 
-def check_foreground_window(label: str) -> None:
+def check_foreground_window(label: str, game_window_title_hint: str) -> None:
     """Journalise (append) si la fenêtre au premier plan à CET instant ne
-    contient pas GAME_WINDOW_TITLE_HINT -- appelé juste avant chaque presse
+    contient pas `game_window_title_hint` -- appelé juste avant chaque presse
     (cf. main.py::press_fn). N'écrit RIEN quand le jeu a le focus (cas
     normal) pour ne pas noyer le fichier -- seul un vrai vol de focus laisse
-    une trace."""
+    une trace.
+
+    `game_window_title_hint` : PAS de défaut (2026-07-26, généricité du
+    moteur) -- avant ça, ce module (censé être générique) codait en dur
+    `GAME_WINDOW_TITLE_HINT = "fellowship"`, un vrai bug latent pour Saryn
+    (Warframe) : le titre de fenêtre réel de Warframe ne contient jamais
+    "fellowship", donc CHAQUE presse aurait dû logger un faux positif "focus
+    volé" -- jamais remarqué car ce log est purement informatif (n'affecte
+    aucune décision). L'appelant (main.py, qui connaît le personnage actif
+    via game_config.py::CHARACTERS[character]["game_window_title_hint"])
+    fournit désormais la bonne valeur pour CHAQUE jeu.
+
+    EN: `game_window_title_hint`: NO default (2026-07-26, engine genericity)
+    EN: -- before this, this (supposedly generic) module hardcoded
+    EN: `GAME_WINDOW_TITLE_HINT = "fellowship"`, a real latent bug for Saryn
+    EN: (Warframe): Warframe's real window title never contains
+    EN: "fellowship", so EVERY press should have logged a false-positive
+    EN: "focus stolen" -- never noticed because this log is purely
+    EN: informational (never affects any decision). The caller (main.py,
+    EN: which knows the active character via
+    EN: game_config.py::CHARACTERS[character]["game_window_title_hint"])
+    EN: now supplies the right value for EACH game.
+    """
     try:
         hwnd = ctypes.windll.user32.GetForegroundWindow()
         length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
@@ -198,7 +216,7 @@ def check_foreground_window(label: str) -> None:
     except Exception as exc:
         title = f"<erreur lecture fenêtre: {exc!r}>"
 
-    if GAME_WINDOW_TITLE_HINT not in title.lower():
+    if game_window_title_hint.lower() not in title.lower():
         line = f"{time.strftime('%H:%M:%S')} presse {label!r} envoyée alors que la fenêtre au premier plan est {title!r} (pas le jeu)\n"
         with FOCUS_LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(line)

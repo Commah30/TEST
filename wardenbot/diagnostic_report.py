@@ -65,8 +65,8 @@ class DiagnosticReport:
         return "\n".join(lines)
 
 
-def check_game_window() -> DiagnosticCheck:
-    title = find_window_by_title_hint()
+def check_game_window(game_window_title_hint: str) -> DiagnosticCheck:
+    title = find_window_by_title_hint(game_window_title_hint)
     if title:
         return DiagnosticCheck("Jeu détecté", SEVERITY_OK, f"Fenêtre trouvée : {title!r}")
     return DiagnosticCheck(
@@ -184,7 +184,14 @@ def run_diagnostic(character: str, profile: "Optional[str]" = None) -> Diagnosti
     """Exécute toutes les vérifications pour `character`/`profile` et
     retourne un rapport complet -- ne lève jamais (chaque check capture ses
     propres erreurs), même si la config elle-même est invalide/absente."""
-    checks = [check_game_window(), check_capture(), check_yolo_loaded(), check_gpu(), check_dpi()]
+    from wardenbot.game_config import CHARACTERS
+    char_cfg = CHARACTERS.get(character, {})
+    # .get(..., "") plutôt qu'un défaut "fellowship" en dur ICI (2026-07-26,
+    # généricité du moteur) : un personnage sans cette clé ferait échouer la
+    # détection de fenêtre plutôt que de mentir sur le jeu supposé.
+    game_window_title_hint = char_cfg.get("game_window_title_hint", "")
+
+    checks = [check_game_window(game_window_title_hint), check_capture(), check_yolo_loaded(), check_gpu(), check_dpi()]
 
     try:
         config = ConfigManager(character, profile=profile)
@@ -192,8 +199,7 @@ def run_diagnostic(character: str, profile: "Optional[str]" = None) -> Diagnosti
         checks.append(DiagnosticCheck("Configuration", SEVERITY_ERROR, f"Configuration invalide : {exc}", suggestion="Réinitialiser les paramètres ?"))
         return DiagnosticReport(checks=checks)
 
-    from wardenbot.game_config import CHARACTERS
-    required_regions = CHARACTERS.get(character, {}).get("required_regions")
+    required_regions = char_cfg.get("required_regions")
 
     checks.append(check_configuration(config, required_regions))
     checks.append(check_keybinds(config))

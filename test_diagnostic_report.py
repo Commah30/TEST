@@ -32,12 +32,14 @@ from wardenbot.diagnostic_report import (
 def test_check_game_window_never_raises_regardless_of_whether_game_is_open():
     """Ne présuppose PAS que le jeu est ouvert (dépend de la machine qui
     lance le test) -- vérifie juste que le check répond, avec le bon
-    niveau de sévérité dans les deux cas."""
-    check = check_game_window()
+    niveau de sévérité dans les deux cas. check_game_window(hint) prend
+    désormais un hint explicite (2026-07-26, généricité du moteur -- plus de
+    défaut "fellowship" en dur, cf. wardenbot/diagnostics.py)."""
+    check = check_game_window("fellowship")
     assert check.severity in (SEVERITY_OK, SEVERITY_ERROR)
     if check.severity == SEVERITY_ERROR:
         assert check.suggestion is not None
-    print(f"check_game_window() : {check.severity} -- {check.detail}")
+    print(f"check_game_window('fellowship') : {check.severity} -- {check.detail}")
 
 
 def test_check_capture_succeeds_on_a_real_windows_machine():
